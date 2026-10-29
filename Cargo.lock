@@ -182,7 +182,7 @@ version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -553,7 +553,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1035,7 +1035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aae1df220ece3c0ada96b8153459b67eebe9ae9212258bb0134ae60416fdf76"
 dependencies = [
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "pkg-config",
 ]
 
@@ -1056,6 +1056,16 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
@@ -1644,6 +1654,26 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "openxr"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53770c8f7d3f185bcb577b78f2ed8e33bbf7cdf5cd57fb68b5ec0b4117b79de6"
+dependencies = [
+ "libc",
+ "libloading 0.9.0",
+ "openxr-sys",
+]
+
+[[package]]
+name = "openxr-sys"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "febb5d50cee7b964b69d5b7a810ed9620fc64f41382ffefe05434754c7a48877"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "orbclient"
@@ -2324,134 +2354,6 @@ name = "ssx3-ee-unwind"
 version = "0.1.0"
 dependencies = [
  "ssx3-ee-rt",
- "ssx3-ee-unwind-s00",
- "ssx3-ee-unwind-s01",
- "ssx3-ee-unwind-s02",
- "ssx3-ee-unwind-s03",
- "ssx3-ee-unwind-s04",
- "ssx3-ee-unwind-s05",
- "ssx3-ee-unwind-s06",
- "ssx3-ee-unwind-s07",
- "ssx3-ee-unwind-s08",
- "ssx3-ee-unwind-s09",
- "ssx3-ee-unwind-s10",
- "ssx3-ee-unwind-s11",
- "ssx3-ee-unwind-s12",
- "ssx3-ee-unwind-s13",
- "ssx3-ee-unwind-s14",
- "ssx3-ee-unwind-s15",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s00"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s01"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s02"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s03"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s04"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s05"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s06"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s07"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s08"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s09"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s10"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s11"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s12"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s13"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s14"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
-]
-
-[[package]]
-name = "ssx3-ee-unwind-s15"
-version = "0.1.0"
-dependencies = [
- "ssx3-ee-rt",
 ]
 
 [[package]]
@@ -2557,6 +2459,13 @@ name = "ssx3-snd"
 version = "0.1.0"
 dependencies = [
  "ssx3-iop",
+]
+
+[[package]]
+name = "ssx3-vr"
+version = "0.1.0"
+dependencies = [
+ "openxr",
 ]
 
 [[package]]
@@ -3167,7 +3076,7 @@ dependencies = [
  "js-sys",
  "khronos-egl",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "naga",
  "naga-types",
@@ -3534,7 +3443,7 @@ dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "once_cell",
  "rustix 1.1.5",
  "x11rb-protocol",

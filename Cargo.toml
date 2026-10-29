@@ -18,6 +18,7 @@ members = [
     "crates/ssx3-game",
     "crates/ssx3-web",
     "crates/ssx3-vuworker",
+    "crates/ssx3-vr",
     "generated/ee/*",
     "generated/ee-unwind/*",
     "generated/iop/*",

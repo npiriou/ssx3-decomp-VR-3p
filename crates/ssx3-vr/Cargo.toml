@@ -1,0 +1,13 @@
+[package]
+name = "ssx3-vr"
+description = "OpenXR diagnostics and future SteamVR front end for SSX 3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openxr = { version = "0.22.0", default-features = false, features = ["loaded"] }
+
+[[bin]]
+name = "ssx3-vr-probe"
+path = "src/main.rs"

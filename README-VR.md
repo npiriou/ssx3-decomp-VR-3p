@@ -38,3 +38,9 @@ cargo run --profile game -p ssx3 --bin ssx3
 
 The VR executable will be a separate front end. Until it exists, this
 command is a desktop baseline only.
+
+To inspect the active OpenXR runtime and headset before the VR renderer is
+ready, run `cargo run -p ssx3-vr --bin ssx3-vr-probe`. This diagnostic does
+not start the game or create a VR graphics session. If the OpenXR loader DLL
+is installed outside the default Steam directory, set `SSX3_OPENXR_LOADER`
+to its full path.

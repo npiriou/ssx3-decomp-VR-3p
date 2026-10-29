@@ -68,6 +68,12 @@ already uses `wgpu`; the graphics binding and swapchain texture handoff are
 the first engineering spike. Do not introduce a second game engine or rewrite
 the SSX 3 game loop.
 
+The initial `ssx3-vr-probe` checks loader, runtime, graphics extension and
+headset view sizes without starting a game or graphics session. On the local
+machine on 2026-10-29 it reported SteamVR/OpenXR 2.18.4, a PICO headset,
+two recommended 1920 × 1920 views and Vulkan binding support. Swapchains,
+stereo rendering and frame delivery remain to be implemented and measured.
+
 References: [Khronos OpenXR frame submission](https://github.com/KhronosGroup/OpenXR-Guide/blob/main/chapters/frame_submission.md),
 [OpenXR Rust bindings](https://github.com/Ralith/openxrs), and
 [Steamworks VR application settings](https://partner.steamgames.com/doc/features/steamvr/settings).
