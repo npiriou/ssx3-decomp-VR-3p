@@ -103,6 +103,7 @@ emulated PS2 path for comparison:
 | `SSX3_VU1=emu` | The translated VU1 microcode instead of the native Rust programs (only used outside native rendering). |
 | `SSX3_TICK_HZ=120` | Game rate (settings: "Game rate"): the game updates N times a second, one image per update (no interpolation needed). Every 1/60 step the game loads follows the rate; per-tick code the conversion pass has not reached yet may still run fast. See [`plans/configurable-tick-rate.md`](plans/configurable-tick-rate.md). |
 | `SSX3_HOST_CLOCK=1` | Keep game time real-time when the host falls behind (extra 60 Hz updates, fewer rendered frames). Known issue: with a host that stays behind, the game can stall (all threads waiting); off by default. |
+| `SSX3_FRAME_TIMES=1` | Log slow window frames with game and presentation times; the presenter also reports its selected mode and long presentation stalls. |
 | `SSX3_GS=cpu` | With `SSX3_RENDER=emu`: software rasterizer instead of the GPU one (slow; for debugging). |
 | `SSX3_RENDER_NATIVE=all` | With `SSX3_RENDER=emu`: the emulated GS draws with wgpu render pipelines instead of the compute GS. |
 

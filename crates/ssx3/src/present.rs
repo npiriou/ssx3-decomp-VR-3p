@@ -205,10 +205,24 @@ impl Presenter {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
+        let modes = surface.get_capabilities(&adapter).present_modes;
         let mut config = surface
             .get_default_config(&adapter, width, height)
             .expect("surface not supported by adapter");
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        // Mailbox keeps VSync while replacing a queued old image with the
+        // latest one. FIFO can block the game's presentation path for another
+        // refresh when a frame arrives just after the deadline.
+        config.present_mode = if modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::AutoVsync
+        };
+        if std::env::var_os("SSX3_FRAME_TIMES").is_some() {
+            eprintln!(
+                "[present] mode: {:?} (supported: {modes:?})",
+                config.present_mode
+            );
+        }
         surface.configure(&device, &config);
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -580,10 +594,14 @@ impl Presenter {
         pipeline: &wgpu::RenderPipeline,
         bind_group: &wgpu::BindGroup,
     ) -> Result<(), PresentError> {
+        static TRACE_FRAMES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE_FRAMES.get_or_init(|| std::env::var_os("SSX3_FRAME_TIMES").is_some());
+        let start = trace.then(std::time::Instant::now);
         if self.reconfigure && !self.configure() {
             return Err(PresentError::Skip);
         }
         let frame = self.surface.get_current_texture();
+        let acquired_at = trace.then(std::time::Instant::now);
         let acquired = match frame {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -666,7 +684,21 @@ impl Presenter {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        let submitted_at = trace.then(std::time::Instant::now);
         self.queue.present(acquired);
+        if let (Some(start), Some(acquired_at), Some(submitted_at)) =
+            (start, acquired_at, submitted_at)
+        {
+            let total = start.elapsed().as_secs_f64() * 1e3;
+            if total > 18.0 {
+                eprintln!(
+                    "[present-time] total {total:.2} ms, acquire {:.2} ms, encode+submit {:.2} ms, queue present {:.2} ms",
+                    (acquired_at - start).as_secs_f64() * 1e3,
+                    (submitted_at - acquired_at).as_secs_f64() * 1e3,
+                    submitted_at.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        }
         Ok(())
     }
 }

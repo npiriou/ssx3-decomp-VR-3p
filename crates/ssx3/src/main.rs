@@ -60,6 +60,8 @@ struct App {
     catch_up: bool,
     /// The display's refresh rate (Hz).
     display_hz: f64,
+    /// Log frame and presentation stalls when SSX3_FRAME_TIMES=1.
+    trace_frames: bool,
     /// The settings overlay (F10): open with this row selected; the game
     /// is paused meanwhile.
     menu: Option<usize>,
@@ -86,6 +88,20 @@ fn field() -> Duration {
     match ssx3_ps2::machine::vsync_hz() {
         60 => Duration::from_micros(16_683),
         hz => Duration::from_secs_f64(1.001 / hz as f64),
+    }
+}
+
+/// Limit rendered ticks per image to the display's ordinary cadence. A
+/// small difference from a whole multiple (for example a reported 59 Hz
+/// mode) is handled as timing debt; rendering an extra whole frame turns one
+/// slow game tick into a run of visibly slow images even with catch-up off.
+fn rendered_ticks_per_image(game_hz: f64, display_hz: f64) -> u32 {
+    let ratio = game_hz / display_hz;
+    let whole = ratio.round();
+    if whole >= 1.0 && (ratio / whole - 1.0).abs() < 0.02 {
+        whole as u32
+    } else {
+        (ratio - 0.01).ceil().max(1.0) as u32
     }
 }
 
@@ -374,13 +390,16 @@ impl ApplicationHandler for App {
                 let period = field().as_secs_f64();
                 let now = self.started.elapsed().as_secs_f64();
                 let game_hz = ssx3_ps2::machine::vsync_hz() as f64 / 1.001;
-                let max_vsyncs = (game_hz / self.display_hz - 0.01).ceil().max(1.0) as u32;
+                let max_vsyncs = rendered_ticks_per_image(game_hz, self.display_hz);
                 let plan = self.pacer.plan(now, period, max_vsyncs, self.catch_up);
                 if plan.vsyncs == 0 {
                     if self.pacer.repeat_image() {
                         // Show the last image again: the next call comes
                         // with the next display refresh.
+                        let previous = self.last;
+                        let show_start = Instant::now();
                         self.show();
+                        self.trace_frame(previous, 0.0, show_start.elapsed(), 0);
                         return;
                     }
                     let w = self.pacer.wait(now, period);
@@ -391,12 +410,22 @@ impl ApplicationHandler for App {
                     (self.pacer.audio_lead() * 48000.0) as u32,
                 );
                 ssx3_game::tick::set_updates_per_vsync(plan.updates_per_vsync);
+                let previous = self.last;
+                let run_start = Instant::now();
                 for _ in 0..plan.vsyncs {
                     if !self.step(event_loop) {
                         return;
                     }
                 }
+                let run_time = run_start.elapsed();
+                let show_start = Instant::now();
                 self.show();
+                self.trace_frame(
+                    previous,
+                    run_time.as_secs_f64(),
+                    show_start.elapsed(),
+                    plan.vsyncs,
+                );
             }
             _ => {}
         }
@@ -410,6 +439,26 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    fn trace_frame(&mut self, previous: Instant, run_s: f64, show: Duration, vsyncs: u32) {
+        if !self.trace_frames || ssx3_ps2::m!(self.cpu).sched.frames < 450 {
+            return;
+        }
+        let gap_ms = self.last.duration_since(previous).as_secs_f64() * 1000.0;
+        let run_ms = run_s * 1000.0;
+        let show_ms = show.as_secs_f64() * 1000.0;
+        let display_ms = 1000.0 / self.display_hz;
+        if gap_ms > display_ms * 1.25
+            || run_ms > field().as_secs_f64() * vsyncs as f64 * 1000.0
+            || show_ms > display_ms * 1.25
+        {
+            eprintln!(
+                "[frame-time] frame {} gap {gap_ms:.2} ms, game {run_ms:.2} ms ({vsyncs} ticks), present {show_ms:.2} ms, repeats {}",
+                ssx3_ps2::m!(self.cpu).sched.frames,
+                self.pacer.repeats
+            );
+        }
+    }
+
     /// Run one game frame; false when the game halted.
     fn step(&mut self, event_loop: &ActiveEventLoop) -> bool {
         self.update_pad();
@@ -708,6 +757,7 @@ fn main() {
         pacer: ssx3_game::tick::Pacer::default(),
         catch_up: true,
         display_hz: 60.0,
+        trace_frames: std::env::var_os("SSX3_FRAME_TIMES").is_some(),
         menu: None,
         restart_pending: false,
         preview: 0,
