@@ -44,3 +44,8 @@ ready, run `cargo run -p ssx3-vr --bin ssx3-vr-probe`. This diagnostic does
 not start the game or create a VR graphics session. If the OpenXR loader DLL
 is installed outside the default Steam directory, set `SSX3_OPENXR_LOADER`
 to its full path.
+
+`cargo run -p ssx3-vr --bin ssx3-vr-probe -- --session` also creates an
+OpenXR Vulkan graphics session and submits a short sequence of red and blue
+eye images. It reports the headset pose and predicted display period, then
+closes the session. It is a hardware check, not yet a game image.

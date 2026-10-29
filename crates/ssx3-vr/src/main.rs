@@ -4,6 +4,9 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+mod xr_session;
+mod xr_swapchain;
+
 fn load_entry() -> Result<openxr::Entry, Box<dyn Error>> {
     // SAFETY: these libraries must implement the OpenXR loader ABI. The
     // default is resolved by the OS; the fallback is the installed SteamVR
@@ -38,7 +41,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         engine_version: 1,
         ..Default::default()
     };
-    let instance = entry.create_instance(&app, &openxr::ExtensionSet::default(), &[], &())?;
+    let with_session = std::env::args().skip(1).any(|arg| arg == "--session");
+    let mut enabled = openxr::ExtensionSet::default();
+    if with_session {
+        if !extensions.khr_vulkan_enable2 {
+            return Err("This OpenXR runtime lacks XR_KHR_vulkan_enable2".into());
+        }
+        enabled.khr_vulkan_enable2 = true;
+    }
+    let instance = entry.create_instance(&app, &enabled, &[], &())?;
     let runtime = instance.properties()?;
     println!(
         "OpenXR runtime: {} ({:?})",
@@ -69,6 +80,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             view.max_image_rect_width,
             view.max_image_rect_height,
         );
+    }
+    if with_session {
+        xr_session::probe(&instance, system)?;
     }
     Ok(())
 }

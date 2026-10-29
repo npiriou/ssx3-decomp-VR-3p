@@ -69,10 +69,24 @@ the first engineering spike. Do not introduce a second game engine or rewrite
 the SSX 3 game loop.
 
 The initial `ssx3-vr-probe` checks loader, runtime, graphics extension and
-headset view sizes without starting a game or graphics session. On the local
-machine on 2026-10-29 it reported SteamVR/OpenXR 2.18.4, a PICO headset,
-two recommended 1920 × 1920 views and Vulkan binding support. Swapchains,
-stereo rendering and frame delivery remain to be implemented and measured.
+headset view sizes. Its `--session` mode creates a Vulkan graphics session,
+locates both HMD eye poses at the predicted display time, follows session
+events and submits colored images to a two-layer swapchain. On the local
+machine on 2026-10-29 it
+reported SteamVR/OpenXR 2.18.4, a PICO headset, two recommended 1920 × 1920
+views, Vulkan binding support and a 13.889 ms display period (72 Hz). The
+session entered READY, VISIBLE and FOCUSED, then exited through STOPPING.
+The swapchain uses three 1920 × 1920 × 2 RGBA8 sRGB images. A later run while
+the HMD was idle reported a throttled 69.445 ms period (14.4 Hz); that run
+proves API submission but not visible in-headset presentation. Stereo game
+rendering and frame delivery remain to be implemented and measured.
+
+At this headset setting the OpenXR loop runs at 72 Hz while the initial game
+simulation target is 60 Hz. A fixed 60/72 presentation pattern would judder;
+the renderer must keep head pose updates at the runtime cadence and either
+interpolate the chase camera or use a headset mode divisible by 60. The
+performance target is at least 60 distinct stereo images per second, with
+smooth head tracking at the selected headset refresh rate.
 
 References: [Khronos OpenXR frame submission](https://github.com/KhronosGroup/OpenXR-Guide/blob/main/chapters/frame_submission.md),
 [OpenXR Rust bindings](https://github.com/Ralith/openxrs), and

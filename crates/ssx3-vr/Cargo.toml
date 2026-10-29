@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ash = "0.38.0"
 openxr = { version = "0.22.0", default-features = false, features = ["loaded"] }
 
 [[bin]]
