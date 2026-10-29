@@ -29,6 +29,7 @@ pub mod pack;
 mod post;
 mod shadow;
 pub mod tex;
+pub mod vr;
 
 pub use options::{Aa, Bloom, Options};
 pub use shadow::{set_debug_knob, DEBUG_KNOBS};
@@ -188,6 +189,8 @@ pub struct Inner {
     pass_counts: [u64; 6],
     /// The image on screen, for presenting (sRGB view allowed).
     present: Vec<wgpu::Texture>,
+    /// Eye currently drawn, and game-clip to eye-clip transform.
+    vr_eye: Option<(usize, [[f32; 4]; 4])>,
     /// Vertex and uniform buffers, kept across frames (grown as needed).
     vbuf: Option<wgpu::Buffer>,
     ubuf: Option<wgpu::Buffer>,
@@ -222,6 +225,7 @@ pub struct Shared {
     /// The latest frame's images (in-between ones first) and when they
     /// were ready.
     present: Mutex<Option<(Vec<wgpu::Texture>, web_time::Instant)>>,
+    vr_eyes: Mutex<Option<[vr::Eye; 2]>>,
 }
 
 fn program(m: Material) -> Option<u64> {
@@ -336,6 +340,7 @@ impl Renderer {
                 depth_parts: [0.0; 3],
                 pass_counts: [0; 6],
                 present: Vec::new(),
+                vr_eye: None,
                 staged: None,
                 vbuf: None,
                 gbuf: [None, None, None, None],
@@ -396,6 +401,43 @@ impl Renderer {
             ..Default::default()
         });
         Some((view, t.width(), t.height()))
+    }
+
+    /// The two independently rendered game views, left then right.
+    pub fn present_stereo_views(&self) -> Option<[(wgpu::TextureView, u32, u32); 2]> {
+        let g = self.1.present.lock().unwrap();
+        let t = &g.as_ref()?.0;
+        if t.len() != 2 {
+            return None;
+        }
+        Some(std::array::from_fn(|eye| {
+            (
+                t[eye].create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+                    ..Default::default()
+                }),
+                t[eye].width(),
+                t[eye].height(),
+            )
+        }))
+    }
+
+    /// Read both eye images for offline stereo inspection.
+    pub fn read_stereo_images(&self) -> Option<[(u32, u32, Vec<u32>); 2]> {
+        self.flush();
+        let g = self.0.lock().unwrap();
+        if g.present.len() != 2 {
+            return None;
+        }
+        Some(std::array::from_fn(|i| {
+            let t = &g.present[i];
+            g.read_texture(t, t.width(), t.height())
+        }))
+    }
+
+    /// Supply tracked eye cameras in the moving game's chase-camera space.
+    pub fn set_vr_eyes(&self, eyes: Option<[vr::Eye; 2]>) {
+        *self.1.vr_eyes.lock().unwrap() = eyes;
     }
 
     /// The modern graphics options.
@@ -984,6 +1026,28 @@ impl Inner {
         Build::run(&mut b, built, mem);
         self.put_build(b);
         self.timing.1[0] += t_start.elapsed().as_secs_f64() * 1e3;
+        let eyes = *self.shared.vr_eyes.lock().unwrap();
+        // The last perspective record is the active scene projection. The
+        // first one may use a shorter near plane for sky/background draws.
+        let source = built
+            .frame
+            .matrices
+            .iter()
+            .filter(|m| m.view_proj[2][3].abs() > 0.5)
+            .last();
+        if let (Some(eyes), Some(source)) = (eyes, source) {
+            if let (Some(left), Some(right)) = (
+                vr::reproject(eyes[0], source.view_proj),
+                vr::reproject(eyes[1], source.view_proj),
+            ) {
+                for (index, reprojection) in [left, right].into_iter().enumerate() {
+                    self.vr_eye = Some((index, reprojection));
+                    self.draw_built(mem);
+                }
+                self.vr_eye = None;
+                return;
+            }
+        }
         self.draw_built(mem);
     }
 
@@ -1502,7 +1566,14 @@ impl Inner {
                 self.rt_fxy(st.target)
             };
             let px = |v: u32, f: f32| (v as f32 * f).round() as u32;
+            let vr_world = self.vr_eye.is_some()
+                && st.target == self.gs.main_fbp
+                && !b.tag.hud
+                && b.tag.post.is_none();
             let scissor = (x0 <= x1 && y0 <= y1 && x0 < tw && y0 < th).then(|| {
+                if vr_world {
+                    return [0, 0, pw, ph];
+                }
                 let (a, b) = (px(x0, fx), px(y0, fy));
                 [
                     a,
@@ -1516,20 +1587,24 @@ impl Inner {
             };
             // (Vertex bounds in target pixels, a pixel's margin: the GPU
             // samples at pixel centres.)
-            let bounds = match b.gpu {
-                Some(g) => g.bounds,
-                None => Some(
-                    self.gs.verts[b.first as usize..(b.first + b.count) as usize]
-                        .iter()
-                        .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |m, v| {
-                            [
-                                m[0].min(v.pos[0]),
-                                m[1].min(v.pos[1]),
-                                m[2].max(v.pos[0]),
-                                m[3].max(v.pos[1]),
-                            ]
-                        }),
-                ),
+            let bounds = if vr_world {
+                None
+            } else {
+                match b.gpu {
+                    Some(g) => g.bounds,
+                    None => Some(
+                        self.gs.verts[b.first as usize..(b.first + b.count) as usize]
+                            .iter()
+                            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |m, v| {
+                                [
+                                    m[0].min(v.pos[0]),
+                                    m[1].min(v.pos[1]),
+                                    m[2].max(v.pos[0]),
+                                    m[3].max(v.pos[1]),
+                                ]
+                            }),
+                    ),
+                }
             };
             let area = match bounds.filter(|b| b[0] <= b[2] && b[1] <= b[3]) {
                 Some(b) => {
@@ -1704,6 +1779,19 @@ impl Inner {
                         std::mem::size_of_val(&words),
                     )
                 });
+                let reprojection = if vr_world {
+                    self.vr_eye.map(|(_, m)| m)
+                } else {
+                    None
+                };
+                let matrix = reprojection.unwrap_or(vr::IDENTITY);
+                for column in matrix {
+                    for value in column {
+                        ubytes.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+                ubytes.extend_from_slice(&(reprojection.is_some() as u32).to_le_bytes());
+                ubytes.extend_from_slice(&[0u8; 12]);
                 ubytes.resize(
                     ubytes.len().next_multiple_of(draw::UNIFORM_STRIDE as usize),
                     0,
@@ -2005,6 +2093,7 @@ impl Inner {
         let mut copied = 0u64;
         // A pass on target `fbp`; depth starts cleared on a target's first
         // pass of the frame.
+        let vr_frame = self.vr_eye.is_some();
         let begin =
             |enc: &mut wgpu::CommandEncoder, fbp: u32, first: bool| -> wgpu::RenderPass<'static> {
                 let (c, d) = if fbp == main {
@@ -2025,7 +2114,7 @@ impl Inner {
                         ops: wgpu::Operations {
                             // (The lighting fit's views start from black:
                             // they draw the terrain only.)
-                            load: if first && fbp == main && shadow::fitting_view() {
+                            load: if first && fbp == main && (shadow::fitting_view() || vr_frame) {
                                 wgpu::LoadOp::Clear(wgpu::Color::BLACK)
                             } else {
                                 wgpu::LoadOp::Load
@@ -2380,7 +2469,7 @@ impl Inner {
             Some(r) => &r.color,
             None => &t.color,
         };
-        let (slots, slot) = (1, 0);
+        let (slots, slot) = self.vr_eye.map_or((1, 0), |(eye, _)| (2, eye));
         if self.present.len() != slots
             || self
                 .present

@@ -222,7 +222,7 @@ impl StereoTarget {
         for eye in 0..2 {
             let view = texture.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: eye,
+                base_array_layer: eye as u32,
                 array_layer_count: Some(1),
                 ..Default::default()
             });
@@ -269,13 +269,11 @@ impl StereoTarget {
         Ok(())
     }
 
-    /// Interim game display: show the native renderer's image in each eye.
-    /// The stereo camera will replace this panel after the frame renderer
-    /// can rebuild its 3D geometry from two eye projections.
-    pub fn blit_game(
+    /// Copy the two separately rendered scene images to their OpenXR layers.
+    pub fn blit_stereo(
         &self,
         graphics: &WgpuXr,
-        source: &wgpu::TextureView,
+        sources: [&wgpu::TextureView; 2],
     ) -> Result<(), Box<dyn Error>> {
         let mut swapchain = self
             .swapchain
@@ -287,31 +285,31 @@ impl StereoTarget {
             .textures
             .get(index)
             .ok_or("OpenXR image index out of range")?;
-        let bind_group = graphics
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("SSX 3 VR current game image"),
-                layout: &self.panel_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(source),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.panel_sampler),
-                    },
-                ],
-            });
         let mut encoder = graphics
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("SSX 3 VR game image blit"),
             });
         for eye in 0..2 {
+            let bind_group = graphics
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("SSX 3 VR eye scene"),
+                    layout: &self.panel_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(sources[eye]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.panel_sampler),
+                        },
+                    ],
+                });
             let view = texture.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: eye,
+                base_array_layer: eye as u32,
                 array_layer_count: Some(1),
                 ..Default::default()
             });

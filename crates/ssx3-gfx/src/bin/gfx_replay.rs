@@ -61,6 +61,41 @@ fn main() {
     {
         r.set_scale(n);
     }
+    // Offline VR geometry check: render one tracked eye from the saved
+    // course frame without requiring an active headset.
+    let vr_replay = std::env::var("SSX3_VR_REPLAY_EYE").ok();
+    if let Some(spec) = vr_replay.as_deref() {
+        let (offset, yaw_degrees) = match spec {
+            "left" => (-3.2, 0.0),
+            "right" => (3.2, 0.0),
+            "stereo" => (0.0, 0.0),
+            "look-right" => (0.0, 25.0f32),
+            "look-side" => (0.0, 90.0f32),
+            "look-back" => (0.0, 180.0f32),
+            _ => panic!("SSX3_VR_REPLAY_EYE: left, right, look-right, look-side or look-back"),
+        };
+        let a = yaw_degrees.to_radians();
+        let (s, c) = a.sin_cos();
+        let mut view = ssx3_gfx::vr::IDENTITY;
+        view[0] = [c, 0.0, s, 0.0];
+        view[2] = [-s, 0.0, c, 0.0];
+        view[3][0] = -offset;
+        let eye = ssx3_gfx::vr::Eye {
+            view_from_game: view,
+            projection: ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0),
+        };
+        let eyes = if spec == "stereo" {
+            std::array::from_fn(|i| {
+                let mut e = eye;
+                e.view_from_game[3][0] = if i == 0 { 3.2 } else { -3.2 };
+                e
+            })
+        } else {
+            [eye; 2]
+        };
+        r.set_vr_eyes(Some(eyes));
+        r.set_output_size(Some((1024, 1024)));
+    }
     if std::env::var_os("SSX3_REPLAY_DEPTH").is_some() {
         r.set_want_depth(true);
     }
@@ -75,6 +110,29 @@ fn main() {
         for (i, (mem, carry)) in frames.iter().enumerate() {
             let t0 = std::time::Instant::now();
             let built = frame_sink::build_dump_cached(mem, carry, &mut chains).expect("no frame");
+            if std::env::var_os("SSX3_VR_INSPECT_MATRICES").is_some()
+                && i + 1 == frames.len()
+                && rep == 0
+            {
+                eprintln!(
+                    "[vr-matrix] {} records, {} screen views, {} draws",
+                    built.frame.matrices.len(),
+                    built.frame.views.len(),
+                    built.frame.draws().count()
+                );
+                for (n, m) in built.frame.matrices.iter().take(4).enumerate() {
+                    eprintln!("[vr-matrix] record {n}: world {:?} view {:?} view_proj {:?} world_clip {:?} guard {:?} offset {:?}", m.world, m.view, m.view_proj, m.world_clip, m.guard_scale, m.guard_offset);
+                }
+                for (n, v) in built.frame.views.iter().enumerate() {
+                    eprintln!("[vr-matrix] screen view {n}: {:?}", v.screen);
+                }
+                let mut by = std::collections::BTreeMap::new();
+                for d in built.frame.draws() {
+                    *by.entry((d.matrix, format!("{:?}", d.state.material)))
+                        .or_insert(0usize) += 1;
+                }
+                eprintln!("[vr-matrix] draw matrix/material counts: {by:?}");
+            }
             // SSX3_VIF_STATS: decoded (not replayed) VU input qwords per
             // material and calls.
             if std::env::var_os("SSX3_VIF_STATS").is_some() {
@@ -255,6 +313,30 @@ fn main() {
         );
     }
     let dumps = &dumps[..];
+    if vr_replay.as_deref() == Some("stereo") {
+        let [left, right] = r.read_stereo_images().expect("two VR eyes");
+        assert_eq!((left.0, left.1), (right.0, right.1));
+        let differing = left.2.iter().zip(&right.2).filter(|(a, b)| a != b).count();
+        eprintln!(
+            "[vr-stereo] {differing}/{} pixels differ between the two rendered eyes",
+            left.2.len()
+        );
+        assert!(
+            differing > left.2.len() / 100,
+            "eyes are effectively identical"
+        );
+        let path = std::path::Path::new(out);
+        let stem = path.file_stem().unwrap().to_string_lossy();
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        for (suffix, (w, h, px)) in [("left", left), ("right", right)] {
+            let img: Vec<u32> = px.iter().map(|p| p | 0xFF00_0000).collect();
+            std::fs::write(
+                parent.join(format!("{stem}-{suffix}.png")),
+                png::encode(w, h, &img),
+            )
+            .unwrap();
+        }
+    }
     let (w, h, px) = r.read_image().expect("image");
     let img: Vec<u32> = px.iter().map(|p| p | 0xFF00_0000).collect();
     std::fs::write(out, png::encode(w, h, &img)).unwrap();

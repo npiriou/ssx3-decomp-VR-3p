@@ -1,6 +1,5 @@
 //! Experimental SteamVR front end for the existing native SSX 3 game.
-//! The current image handoff is a flat game panel in each eye; the renderer's
-//! two distinct world views are the next step before this is a VR prototype.
+//! The game's chase camera is reprojected into two tracked scene views.
 
 #[cfg(all(feature = "ee-threads", not(feature = "ee-unwind")))]
 extern crate ssx3_ee_threads as ssx3_ee;
@@ -14,6 +13,9 @@ use gilrs::{Axis, Button, Gilrs};
 use ssx3_vr::openxr as xr;
 use ssx3_vr::xr_wgpu;
 use ssx3_vr::xr_wgpu_session::{self, StereoTarget, VIEW_TYPE};
+
+#[path = "../vr_camera.rs"]
+mod vr_camera;
 
 #[allow(dead_code)]
 #[path = "../game.rs"]
@@ -150,6 +152,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("Native game renderer did not start on the OpenXR GPU".into());
     }
     let gfx = gfx.unwrap();
+    gfx.set_output_size(Some((1280, 1280)));
     ssx3_ps2::machine::set_realtime(true);
     let mut gilrs = Gilrs::new().map(Some).unwrap_or_else(|err| {
         eprintln!("[vr pad] gamepad API unavailable: {err}");
@@ -166,9 +169,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut submitted = 0u64;
     let mut game_rate_mark = Instant::now();
     let mut last_submitted = 0u64;
+    let mut run_ms = 0.0f64;
+    let mut flush_ms = 0.0f64;
+    let mut blit_ms = 0.0f64;
     let mut events = xr::EventDataBuffer::new();
     let mut running = false;
     let mut requested_exit = false;
+    let mut anchor: Option<vr_camera::Anchor> = None;
+    let units_per_metre = std::env::var("SSX3_VR_UNITS_PER_M")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(100.0);
     loop {
         while let Some(event) = instance.poll_event(&mut events)? {
             match event {
@@ -178,6 +190,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                         xr::SessionState::READY => {
                             session.begin(VIEW_TYPE)?;
                             running = true;
+                        }
+                        xr::SessionState::FOCUSED => {
+                            anchor = None;
                         }
                         xr::SessionState::STOPPING => {
                             session.end()?;
@@ -200,8 +215,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         let frame = waiter.wait()?;
         stream.begin()?;
-        let (_flags, views) =
+        let (flags, views) =
             session.locate_views(VIEW_TYPE, frame.predicted_display_time, &local)?;
+        if flags
+            .contains(xr::ViewStateFlags::POSITION_VALID | xr::ViewStateFlags::ORIENTATION_VALID)
+        {
+            if anchor.is_none() {
+                anchor = vr_camera::Anchor::new(&views);
+            }
+            gfx.set_vr_eyes(anchor.and_then(|a| a.eyes(&views, units_per_metre)));
+        }
         let game_hz = ssx3_ps2::machine::vsync_hz() as f64 / 1.001;
         let display_hz = 1_000_000_000.0 / frame.predicted_display_period.as_nanos() as f64;
         // The predicted period can briefly say 72 Hz while an idle HMD
@@ -211,11 +234,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         ssx3_ps2::machine::set_audio_lead_frames((pacer.audio_lead() * 48000.0) as u32);
         ssx3_game::tick::set_updates_per_vsync(plan.updates_per_vsync.max(1));
         for _ in 0..plan.vsyncs {
+            let run_start = Instant::now();
             update_pad(&mut gilrs, &mut cpu);
             if !ssx3_ps2::machine::run_frame(&mut cpu) {
                 return Err(format!("Game halted: {:?}", ssx3_ps2::m!(cpu).kernel.halted).into());
             }
             frames += 1;
+            run_ms += run_start.elapsed().as_secs_f64() * 1000.0;
             if frames % 60 == 0 {
                 let elapsed = game_rate_mark.elapsed().as_secs_f64().max(1e-6);
                 game_rate_mark = Instant::now();
@@ -224,30 +249,39 @@ fn run() -> Result<(), Box<dyn Error>> {
                 last_submitted = submitted;
                 let stats = gfx.stats();
                 let present = gfx
-                    .present_view()
-                    .map(|(_, w, h)| format!("{w}x{h}"))
+                    .present_stereo_views()
+                    .map(|p| format!("{}x{} stereo", p[0].1, p[0].2))
                     .unwrap_or_else(|| "none".into());
                 eprintln!(
-                    "[vr {:.1}s] {} | game {:.1} Hz, OpenXR {:.1} Hz, images {:.1}/s, gfx frames {}, present {present}",
+                    "[vr {:.1}s] {} | game {:.1} Hz, OpenXR {:.1} Hz, images {:.1}/s, gfx frames {}, present {present}; run {:.1} ms/frame, flush {:.1} ms, blit {:.1} ms",
                     start.elapsed().as_secs_f64(),
                     game::status(&cpu),
                     rate,
                     display_hz,
                     image_rate,
                     stats.frames,
+                    run_ms / 60.0,
+                    flush_ms,
+                    blit_ms,
                 );
+                run_ms = 0.0;
+                flush_ms = 0.0;
+                blit_ms = 0.0;
             }
         }
         // OpenXR's Vulkan binding may touch the same VkQueue in acquire,
         // release and end_frame. Vulkan requires host-side synchronization
         // against the renderer worker's queue submissions. Until the queue
         // is wrapped in a shared lock, finish its frame before those calls.
+        let flush_start = Instant::now();
         gfx.flush();
+        flush_ms += flush_start.elapsed().as_secs_f64() * 1000.0;
         if frame.should_render && !no_submit {
+            let blit_start = Instant::now();
             if clear_only {
                 target.clear_eyes(&graphics)?;
-            } else if let Some((view, _, _)) = gfx.present_view() {
-                target.blit_game(&graphics, &view)?;
+            } else if let Some(stereo) = gfx.present_stereo_views() {
+                target.blit_stereo(&graphics, [&stereo[0].0, &stereo[1].0])?;
             } else {
                 target.clear_eyes(&graphics)?;
             }
@@ -259,6 +293,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &views,
             )?;
             submitted += 1;
+            blit_ms += blit_start.elapsed().as_secs_f64() * 1000.0;
         } else {
             stream.end(frame.predicted_display_time, blend, &[])?;
         }

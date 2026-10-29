@@ -16,12 +16,18 @@ controller mapping, sound and save system remain the base of the project.
 
 ## Current state
 
-The repository is copied and still runs as the native desktop game. The
-experimental `ssx3-vr` executable boots the existing game and submits its
-native renderer's image to SteamVR. It currently displays the **same flat
-image in both eyes**. The world camera, terrain, rider and HUD do not yet have
-separate VR views; head tracking and a playable VR presentation remain work
-in progress. See [the VR implementation plan](docs/plans/vr.md).
+The experimental `ssx3-vr` executable boots the existing game and renders
+its 3D triangles twice, from the two OpenXR eye poses. The game's chase
+camera still follows the rider. Turning the headset changes the view into
+the scene; both eye images differ. The old duplicated flat image is gone.
+
+**This is not yet a finished playable VR release.** The game's normal draw
+list covers mainly the forward camera view. Large head turns, especially
+around 90 degrees and behind the rider, reveal missing or stretched geometry.
+The race HUD is still composited into each eye's image. A warmed idle-headset
+run reached about 50 game updates/s on the local RTX 3090, short of the
+60/s target. In-headset image quality and active-headset frame delivery have
+not yet been verified. See [the VR implementation plan](docs/plans/vr.md).
 
 ## Local setup
 
@@ -52,6 +58,13 @@ short course run. While a headset is idle, SteamVR may request almost no
 visible images; those runs validate game simulation but not headset visuals
 or VR frame rate. `SSX3_VR_NO_SUBMIT=1` skips OpenXR images and
 `SSX3_VR_CLEAR_ONLY=1` submits colored eyes to isolate GPU interop issues.
+`SSX3_VR_UNITS_PER_M` adjusts the camera world scale (default 100 game units
+per metre).
+
+For a headset-free renderer check, capture a course frame with
+`SSX3_FRAME_DUMP=2`, then run `gfx_replay` with
+`SSX3_VR_REPLAY_EYE=stereo`. It writes separate `-left.png` and `-right.png`
+images and checks that the two rendered eye images differ.
 
 To inspect the active OpenXR runtime and headset before the VR renderer is
 ready, run `cargo run -p ssx3-vr --bin ssx3-vr-probe`. This diagnostic does

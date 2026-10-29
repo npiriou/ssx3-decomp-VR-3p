@@ -265,6 +265,11 @@ fn gs_vertex(c: u32, hc: vec4<f32>, cz: f32, adc: bool, col: vec4<f32>, stq: vec
     }
     var o: VOut;
     o.pos = vec4<f32>((px + 0.5 * w) / b.size.x * 2.0 - w, w - (py + 0.5 * w) / b.size.y * 2.0, (cz + w) * 0.5, w);
+    if (b.vr_mode != 0u) {
+        let game_clip = vec4<f32>(o.pos.xy, 2.0 * o.pos.z - o.pos.w, o.pos.w);
+        let eye_clip = b.vr_reproject * game_clip;
+        o.pos = vec4<f32>(eye_clip.xy, 0.5 * (eye_clip.w - eye_clip.z), eye_clip.w);
+    }
     o.zw = vec2<f32>(hc.z, w);
     o.zm = vec2<f32>(select(0.0, 1.0, xyzf), off.w);
     o.col = col;
@@ -294,6 +299,7 @@ override LIT: u32 = 63u;
 
 // The GS depth of a fragment (the position's z is the clip z).
 fn gs_depth(v: VOut) -> f32 {
+    if (b.vr_mode != 0u) { return v.pos.z; }
     // The program's FTOI4 depth (x16): XYZ2 takes it as is, XYZF2 / 16 (24
     // bits); negative values wrap (XYZ2: a huge Z; XYZF2: & 0xffffff).
     let sz = v.zw.x / v.zw.y;

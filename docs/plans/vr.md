@@ -20,7 +20,7 @@ gamepad control and 60 game ticks per second.
 - `crates/ssx3-gfx/src/lib.rs` builds and renders the frame. Some geometry is
   already in screen coordinates while GPU VU draws still have world/clip
   information. Stereo must cover both paths, terrain, riders, effects and
-  culling. The current `present_view()` is a single flat image.
+  culling. `present_stereo_views()` now exposes two rendered eye images.
 
 ## Implementation order
 
@@ -78,30 +78,40 @@ views, Vulkan binding support and a 13.889 ms display period (72 Hz). The
 session entered READY, VISIBLE and FOCUSED, then exited through STOPPING.
 The swapchain uses three 1920 × 1920 × 2 RGBA8 sRGB images. A later run while
 the HMD was idle reported a throttled 69.445 ms period (14.4 Hz); that run
-proves API submission but not visible in-headset presentation. Stereo game
-rendering and frame delivery remain to be implemented and measured.
+proves API submission but not visible in-headset presentation.
 
 The `--wgpu` mode now asks OpenXR to create the Vulkan instance and device,
 then adopts both into wgpu 30. The local SteamVR runtime selected the RTX
 3090. The `--wgpu-session` mode also wraps the OpenXR swapchain images as
 wgpu render targets and clears each eye through wgpu. It submitted 1 of 144
 frames while the HMD was idle, without Vulkan or wgpu errors. This proves
-that the native renderer can share the exact GPU device used by SteamVR;
-the game image, stereo camera, HUD and controls are not connected yet.
+that the native renderer can share the exact GPU device used by SteamVR.
 
-The experimental `ssx3-vr` binary now boots the existing game, installs its
-native renderer on the OpenXR-created wgpu device, polls the existing gamepad
-mapping and submits the renderer's image to the XR swapchain. The image is
-still duplicated in both eyes. A short ARA1 run reached frame 700 with the
-renderer producing 512×448 images. The PICO was idle and OpenXR requested
-only one renderable image, before the race image was ready, so actual in-headset
-game presentation is unverified. The same race without XR benchmarked 92 fps
-over frames 500–700. In the idle XR loop, game update rate fluctuated around
-50–60 fps after synchronization; this cannot establish active-headset
-performance. Initial GPU loss was consistent with unsynchronized host access
-to the Vulkan queue between the renderer worker and OpenXR. Flushing the
-worker before the OpenXR acquire/release/end calls let the 700-frame run finish.
-This flush may cost overlap; a shared queue lock is the longer-term fix.
+The `ssx3-vr` binary now boots the existing game, polls its gamepad and
+composes the moving chase camera with tracked eye poses. The native renderer
+projects its 3D triangles separately for each eye and submits both textures
+to the OpenXR swapchain. The game simulation runs once per update. A muted
+ARA1 run reached frame 650 without device loss. An offline course frame
+produced 1,045,714 differing pixels out of 1,048,576 between the two eye
+textures; a 25-degree head turn showed the side of the course and other
+riders while the chase camera remained anchored. The PICO was idle during
+the OpenXR run, so SteamVR requested no visible race images. This does not
+validate the in-headset experience.
+
+The current draw list is culled for the game's forward camera. Around a
+90-degree or 180-degree head turn, missing geometry and stretched triangles
+are visible. Widening the game's FOV did not fix the side/back view. Complete
+geometry must become available before drawing and culling, rather than
+reprojecting only the forward scene. The HUD remains inside each eye image
+instead of a separate comfortable layer.
+
+The first muted idle-headset run compiled shaders while playing and ran
+slowly. A second warmed run reached about 49–53 game updates/s between
+frames 300 and 480, at 1280×1280 per eye. The 60 update/s and 60 stereo
+images/s target remains unproven and unmet in this measurement. The active
+headset rate must be measured after geometry coverage is corrected. Flushing
+the graphics worker before OpenXR acquire/release/end avoided a Vulkan queue
+device loss in the 650-frame run; this flush may cost overlap.
 
 At this headset setting the OpenXR loop runs at 72 Hz while the initial game
 simulation target is 60 Hz. A fixed 60/72 presentation pattern would judder;

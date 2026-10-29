@@ -37,7 +37,7 @@ pub struct BatchU {
 }
 
 /// Size of [`BatchU`] in bytes.
-pub const BATCH_BYTES: u64 = 96;
+pub const BATCH_BYTES: u64 = 176;
 
 pub const UNIFORM_STRIDE: u64 = 256;
 

@@ -38,6 +38,9 @@ struct Batch {
     pad0: f32,
     pad1: f32,
     pad2: f32,
+    // VR: original game clip to this eye's clip. Disabled for HUD/post/RT.
+    vr_reproject: mat4x4<f32>,
+    vr_mode: u32,
 }
 
 @group(0) @binding(0) var<uniform> b: Batch;
@@ -79,6 +82,11 @@ fn vs(v: VIn) -> VOut {
     // GS samples pixels at integer coordinates, the GPU at their centres.
     let p = (v.pos.xy + vec2<f32>(0.5)) / b.size;
     o.pos = vec4<f32>(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, v.pos.z, 1.0);
+    if (b.vr_mode != 0u) {
+        let game_clip = vec4<f32>(o.pos.xy, 1.0 - 2.0 * v.pos.z, 1.0);
+        let eye_clip = b.vr_reproject * game_clip;
+        o.pos = vec4<f32>(eye_clip.xy, 0.5 * (eye_clip.w - eye_clip.z), eye_clip.w);
+    }
     o.col = v.col;
     o.stq = v.stq.xyz;
     o.fog = v.fog;
