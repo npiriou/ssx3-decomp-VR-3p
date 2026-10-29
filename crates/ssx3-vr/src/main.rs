@@ -2,36 +2,11 @@
 //! game's renderer is connected to OpenXR swapchains.
 
 use std::error::Error;
-use std::path::PathBuf;
 
 mod xr_session;
 mod xr_swapchain;
-mod xr_wgpu;
-mod xr_wgpu_session;
 
-fn load_entry() -> Result<openxr::Entry, Box<dyn Error>> {
-    // SAFETY: these libraries must implement the OpenXR loader ABI. The
-    // default is resolved by the OS; the fallback is the installed SteamVR
-    // loader or a path explicitly supplied by the user.
-    if let Ok(entry) = unsafe { openxr::Entry::load(&()) } {
-        return Ok(entry);
-    }
-    let loader = std::env::var_os("SSX3_OPENXR_LOADER")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("ProgramFiles(x86)").map(|base| {
-                PathBuf::from(base)
-                    .join("Steam/steamapps/common/SteamVR/bin/win64/openxr_loader.dll")
-            })
-        })
-        .ok_or("OpenXR loader not found; set SSX3_OPENXR_LOADER to openxr_loader.dll")?;
-    if !loader.is_file() {
-        return Err(format!("OpenXR loader missing at {}", loader.display()).into());
-    }
-    println!("OpenXR loader: {}", loader.display());
-    // SAFETY: same OpenXR loader ABI requirement as above.
-    Ok(unsafe { openxr::Entry::load_from(&loader, &()) }?)
-}
+use ssx3_vr::{load_entry, xr_wgpu, xr_wgpu_session};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let entry = load_entry()?;

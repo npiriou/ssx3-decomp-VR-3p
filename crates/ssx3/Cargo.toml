@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "ssx3-headless"
 path = "src/bin/ssx3_headless.rs"
 
+[[bin]]
+name = "ssx3-vr"
+path = "src/bin/ssx3_vr.rs"
+
 [features]
 default = ["ee-threads"]
 # Dynamic call graph of the EE code (SSX3_CALLPROF=<out>:<from>:<to>).
@@ -44,6 +48,7 @@ ssx3-ee-unwind = { path = "../../generated/ee-unwind/game", package = "ssx3-ee-u
 ssx3-game = { path = "../ssx3-game", default-features = false, features = ["packages"] }
 ssx3-iop = { path = "../ssx3-iop" }
 ssx3-iop-gen = { path = "../../generated/iop/modules" }
+ssx3-vr = { path = "../ssx3-vr" }
 wgpu = "30.0.1"
 winit = "0.30.13"
 

@@ -11,19 +11,22 @@ use wgpu::hal::{api::Vulkan, vulkan::TextureMemory};
 
 use crate::xr_wgpu::WgpuXr;
 
-const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
+pub const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const TEST_FRAMES: u32 = 144;
 
-struct StereoTarget {
+pub struct StereoTarget {
     // Textures are destroyed before the swapchain they refer to.
     textures: Vec<wgpu::Texture>,
     swapchain: Arc<Mutex<xr::Swapchain<xr::Vulkan>>>,
     width: u32,
     height: u32,
+    panel_layout: wgpu::BindGroupLayout,
+    panel_pipeline: wgpu::RenderPipeline,
+    panel_sampler: wgpu::Sampler,
 }
 
 impl StereoTarget {
-    fn new(
+    pub fn new(
         xr_instance: &xr::Instance,
         system: xr::SystemId,
         session: &xr::Session<xr::Vulkan>,
@@ -124,6 +127,67 @@ impl StereoTarget {
                 }
             })
             .collect::<Vec<_>>();
+        let panel_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("SSX 3 VR game image layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let panel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("SSX 3 VR game image sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SSX 3 VR game image"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("vr_panel.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("SSX 3 VR game image pipeline layout"),
+            bind_group_layouts: &[Some(&panel_layout)],
+            immediate_size: 0,
+        });
+        let panel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("SSX 3 VR game image pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         println!(
             "OpenXR wgpu swapchain: {width}x{height}x2, {vk_format:?}, {} images",
             textures.len()
@@ -133,10 +197,13 @@ impl StereoTarget {
             swapchain,
             width,
             height,
+            panel_layout,
+            panel_pipeline,
+            panel_sampler,
         })
     }
 
-    fn clear_eyes(&self, graphics: &WgpuXr) -> Result<(), Box<dyn Error>> {
+    pub fn clear_eyes(&self, graphics: &WgpuXr) -> Result<(), Box<dyn Error>> {
         let mut swapchain = self
             .swapchain
             .lock()
@@ -202,7 +269,82 @@ impl StereoTarget {
         Ok(())
     }
 
-    fn submit_frame(
+    /// Interim game display: show the native renderer's image in each eye.
+    /// The stereo camera will replace this panel after the frame renderer
+    /// can rebuild its 3D geometry from two eye projections.
+    pub fn blit_game(
+        &self,
+        graphics: &WgpuXr,
+        source: &wgpu::TextureView,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut swapchain = self
+            .swapchain
+            .lock()
+            .map_err(|_| "OpenXR swapchain lock poisoned")?;
+        let index = swapchain.acquire_image()? as usize;
+        swapchain.wait_image(xr::Duration::INFINITE)?;
+        let texture = self
+            .textures
+            .get(index)
+            .ok_or("OpenXR image index out of range")?;
+        let bind_group = graphics
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSX 3 VR current game image"),
+                layout: &self.panel_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.panel_sampler),
+                    },
+                ],
+            });
+        let mut encoder = graphics
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("SSX 3 VR game image blit"),
+            });
+        for eye in 0..2 {
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: eye,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SSX 3 VR game image eye"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.panel_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let submitted = graphics.queue.submit(Some(encoder.finish()));
+        graphics.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submitted),
+            timeout: None,
+        })?;
+        swapchain.release_image()?;
+        Ok(())
+    }
+
+    pub fn submit_frame(
         &self,
         stream: &mut xr::FrameStream<xr::Vulkan>,
         display_time: xr::Time,
@@ -244,11 +386,18 @@ impl StereoTarget {
     }
 }
 
-pub fn probe(
+pub fn create_session(
     xr: &xr::Instance,
     system: xr::SystemId,
     graphics: &WgpuXr,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<
+    (
+        xr::Session<xr::Vulkan>,
+        xr::FrameWaiter,
+        xr::FrameStream<xr::Vulkan>,
+    ),
+    Box<dyn Error>,
+> {
     let hal_instance = unsafe { graphics.instance.as_hal::<Vulkan>() }
         .ok_or("OpenXR wgpu instance is not Vulkan")?;
     let hal_device =
@@ -267,8 +416,15 @@ pub fn probe(
     // The OpenXR session may hold these raw handles beyond this function's
     // local borrows. Its guard keeps the backing wgpu objects alive.
     let guard = Box::new((graphics.instance.clone(), graphics.device.clone()));
-    let (session, mut waiter, mut stream) =
-        unsafe { xr.create_session_with_guard::<xr::Vulkan>(system, &create, guard)? };
+    Ok(unsafe { xr.create_session_with_guard::<xr::Vulkan>(system, &create, guard)? })
+}
+
+pub fn probe(
+    xr: &xr::Instance,
+    system: xr::SystemId,
+    graphics: &WgpuXr,
+) -> Result<(), Box<dyn Error>> {
+    let (session, mut waiter, mut stream) = create_session(xr, system, graphics)?;
     let local =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let blend = xr.enumerate_environment_blend_modes(system, VIEW_TYPE)?[0];

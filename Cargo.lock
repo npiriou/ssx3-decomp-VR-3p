@@ -2202,6 +2202,7 @@ dependencies = [
  "ssx3-iop",
  "ssx3-iop-gen",
  "ssx3-ps2",
+ "ssx3-vr",
  "wgpu",
  "winit",
 ]

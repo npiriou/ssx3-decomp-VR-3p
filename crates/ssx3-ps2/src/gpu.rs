@@ -27,6 +27,13 @@ pub fn context() -> Option<&'static GpuContext> {
 
 static CONTEXT: OnceLock<Option<GpuContext>> = OnceLock::new();
 
+/// Supply a GPU created by an external graphics runtime before the native
+/// renderer first requests `context()`. OpenXR uses this so its swapchain
+/// and SSX 3's renderer share the same Vulkan device and queue.
+pub fn install_context(context: GpuContext) -> Result<(), GpuContext> {
+    CONTEXT.set(Some(context)).map_err(|slot| slot.unwrap())
+}
+
 fn context_or_log(r: Result<GpuContext, String>) -> Option<GpuContext> {
     r.map_err(|e| eprintln!("[gs] GPU backend unavailable: {e}"))
         .ok()

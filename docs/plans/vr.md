@@ -89,6 +89,20 @@ frames while the HMD was idle, without Vulkan or wgpu errors. This proves
 that the native renderer can share the exact GPU device used by SteamVR;
 the game image, stereo camera, HUD and controls are not connected yet.
 
+The experimental `ssx3-vr` binary now boots the existing game, installs its
+native renderer on the OpenXR-created wgpu device, polls the existing gamepad
+mapping and submits the renderer's image to the XR swapchain. The image is
+still duplicated in both eyes. A short ARA1 run reached frame 700 with the
+renderer producing 512×448 images. The PICO was idle and OpenXR requested
+only one renderable image, before the race image was ready, so actual in-headset
+game presentation is unverified. The same race without XR benchmarked 92 fps
+over frames 500–700. In the idle XR loop, game update rate fluctuated around
+50–60 fps after synchronization; this cannot establish active-headset
+performance. Initial GPU loss was consistent with unsynchronized host access
+to the Vulkan queue between the renderer worker and OpenXR. Flushing the
+worker before the OpenXR acquire/release/end calls let the 700-frame run finish.
+This flush may cost overlap; a shared queue lock is the longer-term fix.
+
 At this headset setting the OpenXR loop runs at 72 Hz while the initial game
 simulation target is 60 Hz. A fixed 60/72 presentation pattern would judder;
 the renderer must keep head pose updates at the runtime cadence and either

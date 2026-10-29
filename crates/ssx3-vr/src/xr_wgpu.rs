@@ -146,6 +146,9 @@ fn create_device(
         trace: wgpu::Trace::default(),
     };
     let (device, queue) = unsafe { adapter.create_device_from_hal(opened, &desc)? };
+    device.set_device_lost_callback(|reason, message| {
+        eprintln!("[vr gpu] device lost ({reason:?}): {message}");
+    });
     Ok((adapter, device, queue))
 }
 
