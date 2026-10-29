@@ -81,6 +81,14 @@ the HMD was idle reported a throttled 69.445 ms period (14.4 Hz); that run
 proves API submission but not visible in-headset presentation. Stereo game
 rendering and frame delivery remain to be implemented and measured.
 
+The `--wgpu` mode now asks OpenXR to create the Vulkan instance and device,
+then adopts both into wgpu 30. The local SteamVR runtime selected the RTX
+3090. The `--wgpu-session` mode also wraps the OpenXR swapchain images as
+wgpu render targets and clears each eye through wgpu. It submitted 1 of 144
+frames while the HMD was idle, without Vulkan or wgpu errors. This proves
+that the native renderer can share the exact GPU device used by SteamVR;
+the game image, stereo camera, HUD and controls are not connected yet.
+
 At this headset setting the OpenXR loop runs at 72 Hz while the initial game
 simulation target is 60 Hz. A fixed 60/72 presentation pattern would judder;
 the renderer must keep head pose updates at the runtime cadence and either

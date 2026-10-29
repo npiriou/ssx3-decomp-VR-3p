@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 mod xr_session;
 mod xr_swapchain;
+mod xr_wgpu;
+mod xr_wgpu_session;
 
 fn load_entry() -> Result<openxr::Entry, Box<dyn Error>> {
     // SAFETY: these libraries must implement the OpenXR loader ABI. The
@@ -41,9 +43,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         engine_version: 1,
         ..Default::default()
     };
-    let with_session = std::env::args().skip(1).any(|arg| arg == "--session");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let with_session = args.iter().any(|arg| arg == "--session");
+    let with_wgpu = args.iter().any(|arg| arg == "--wgpu");
+    let with_wgpu_session = args.iter().any(|arg| arg == "--wgpu-session");
     let mut enabled = openxr::ExtensionSet::default();
-    if with_session {
+    if with_session || with_wgpu || with_wgpu_session {
         if !extensions.khr_vulkan_enable2 {
             return Err("This OpenXR runtime lacks XR_KHR_vulkan_enable2".into());
         }
@@ -83,6 +88,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if with_session {
         xr_session::probe(&instance, system)?;
+    }
+    if with_wgpu || with_wgpu_session {
+        let graphics = xr_wgpu::create(&instance, system)?;
+        println!("OpenXR wgpu adapter: {}", graphics.adapter.get_info().name);
+        if with_wgpu_session {
+            xr_wgpu_session::probe(&instance, system, &graphics)?;
+        }
+        drop(graphics);
     }
     Ok(())
 }
