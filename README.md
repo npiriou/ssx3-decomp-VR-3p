@@ -1,5 +1,8 @@
 # SSX 3, decompiled
 
+> This checkout is the **SSX 3 VR adaptation**. See [README-VR.md](README-VR.md)
+> for its third-person SteamVR target and current status.
+
 [![SSX 3 running natively: title screen, mode select, race start and three moments of a Snow Jam race](docs/images/screenshots.jpg)](docs/ssx3.mp4)
 
 ▶ **[Video](docs/ssx3.mp4)**

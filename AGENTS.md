@@ -1,3 +1,16 @@
+# VR adaptation (this checkout)
+
+- This repository is the third-person SteamVR adaptation of the existing
+  `ssx3-decomp` Rust port. Reuse its game simulation, native renderer, assets,
+  audio, input and saves; do not create a replacement game or engine.
+- The first VR target is Windows, SteamVR as the OpenXR runtime, a visible
+  rider and chase camera, gamepad control, 60 game ticks per second and
+  measured 60 new stereo images per second. Follow the headset runtime's
+  display cadence and measure actual delivery on hardware.
+- Keep the desktop binary usable while adding a separate VR front end. Port
+  both world rendering paths to true stereo before calling the headset output
+  playable. See `docs/plans/vr.md`.
+
 # Port while you look:
 - Whenever you study a function (in Ghidra, `generated/ee` or the C++ reference) for any task, also port it to hand-written Rust while you are there, with its differential test (porting loop below), if it is still generated. Use subagents for this, if possible.
 
