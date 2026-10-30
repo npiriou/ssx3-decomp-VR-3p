@@ -318,6 +318,15 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   frame, while fresh stereo rates were 59.3 versus 59.4/s over race frames
   420–650; the rate difference is within measurement variation. The mesh
   stays opt-in and the headset gate remains open.
+- The opt-in GPU terrain selector now reuses each edge's two-eye projected
+  error within a patch selection. The cached cubic geometry still remains
+  independent of the current head pose. On a 20-repeat 1920-square Gravitude
+  frame-1000 side replay, it selected the same 114 of 2510 candidate
+  triangles. The stereo PNG matched the previous selector byte-for-byte
+  (SHA-256 `f5b1542c872d7d96e31aaae8761304ffcbc6014a286d97eb635791d00dfa417b`).
+  The last three selection measurements were 0.649–0.690 ms before and
+  0.568–0.651 ms after; whole-frame render time varied in the other direction,
+  so this does not establish a frame-rate gain. The mesh remains opt-in.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it

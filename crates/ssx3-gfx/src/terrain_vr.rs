@@ -396,6 +396,10 @@ impl Mesh {
         let start = stats.timed.then(std::time::Instant::now);
         let mut selected = Vec::new();
         let mut seen = HashSet::new();
+        // A strip visits many of its edges twice. Their cubic samples are
+        // stable across frames, but screen-space error belongs to this eye
+        // pose, so share it only within the current patch selection.
+        let mut projected_edges: Vec<Option<Option<f32>>> = vec![None; geometry.edges.len()];
         let mut patch_triangles = 0;
         for call in calls
             .iter()
@@ -415,11 +419,26 @@ impl Mesh {
                         (verts[1], verts[2]),
                         (verts[2], verts[0]),
                     ] {
-                        if let Some(edge) = geometry.edge(&source.data, a, b, stats) {
-                            if let Some(e) = edge_error(edge, &projects) {
-                                measured = true;
-                                error = error.max(e);
-                            }
+                        let lo = a.min(b);
+                        let delta = a.max(b) - lo;
+                        if !(1..=2).contains(&delta) {
+                            continue;
+                        }
+                        let slot = 2 * lo + delta - 1;
+                        let projected = if let Some(cached) = projected_edges[slot] {
+                            stats.edge_hits += 1;
+                            cached
+                        } else {
+                            let Some(edge) = geometry.edge(&source.data, a, b, stats) else {
+                                continue;
+                            };
+                            let projected = edge_error(edge, &projects);
+                            projected_edges[slot] = Some(projected);
+                            projected
+                        };
+                        if let Some(e) = projected {
+                            measured = true;
+                            error = error.max(e);
                         }
                     }
                     if measured {
