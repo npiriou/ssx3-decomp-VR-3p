@@ -296,6 +296,22 @@ fn configure_vr_game() {
     if std::env::var_os("SSX3_VR_TEXTURES").is_none() {
         std::env::set_var("SSX3_VR_TEXTURES", "1");
     }
+    if std::env::var_os("SSX3_TEX_REPLACE").is_none() {
+        // A VR-only local pack is generated from the owner's disc. Keep the
+        // desktop texture directory and explicit pack overrides untouched.
+        let local = std::path::PathBuf::from("textures/vr-replace");
+        let beside_exe = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("textures/vr-replace")));
+        let source_tree = game::repo_root().join("textures/vr-replace");
+        if let Some(dir) = [Some(local), beside_exe, Some(source_tree)]
+            .into_iter()
+            .flatten()
+            .find(|dir| dir.is_dir())
+        {
+            std::env::set_var("SSX3_TEX_REPLACE", dir);
+        }
+    }
     game::init_standalone();
     settings::load();
     // VR's first target is fixed at 60 game updates per second. Display

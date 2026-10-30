@@ -7,6 +7,7 @@
     tools/upscale-textures.py --all                  # every dumped texture >= --min px
     options: --model auto (default) | ultrasharp-4x | remacri-4x | realesrgan-x4plus | ...
              --scale 4  --min 32  --jobs 2 (images upscaled at once)
+             --edge clamp --alpha linear (non-repeating panorama panels)
              --esrgan PATH (default textures/.tools/realesrgan/realesrgan-ncnn-vulkan)
 
 Models: UltraSharp keeps the textures' fine grain (snow, wood) while
@@ -34,6 +35,18 @@ def wrap_pad(im, p):
     return out
 
 
+def clamp_pad(im, p):
+    """Extend edge texels without joining opposite sides of a panorama."""
+    import numpy as np
+    px = np.asarray(im)
+    pad = [(p, p), (p, p)] + [(0, 0)] * (px.ndim - 2)
+    return Image.fromarray(np.pad(px, pad, mode="edge"))
+
+
+def padded(im, p, edge):
+    return clamp_pad(im, p) if edge == "clamp" else wrap_pad(im, p)
+
+
 def bleed(im):
     """Colour for the transparent texels from their opaque neighbours
     (grown outwards one texel at a time, wrapping), so upscaling does not pull
@@ -53,7 +66,7 @@ def bleed(im):
         grow = ~known & (cnt > 0)
         rgb[grow] = acc[grow] / cnt[grow][:, None]
         known = known | grow
-    return Image.fromarray(rgb.round().astype(np.uint8), "RGB")
+    return Image.fromarray(rgb.round().astype(np.uint8))
 
 
 def esrgan(exe, model, scale, im, tmp):
@@ -66,7 +79,7 @@ def esrgan(exe, model, scale, im, tmp):
     return Image.open(dst).convert("RGB")
 
 
-def upscale(path, out, exe, model, scale):
+def upscale(path, out, exe, model, scale, edge="wrap", alpha_mode="model"):
     im = Image.open(path).convert("RGBA")
     if model == "auto":
         levels = set(im.getchannel("A").getdata())
@@ -76,20 +89,24 @@ def upscale(path, out, exe, model, scale):
     a = im.getchannel("A")
     with tempfile.TemporaryDirectory() as tmp:
         levels = set(a.getdata())
-        rgb = esrgan(exe, model, scale, wrap_pad(bleed(im), p), tmp)
+        rgb = esrgan(exe, model, scale, padded(bleed(im), p, edge), tmp)
         # Some textures use alpha as a mask (environment map, lighting) and
         # are drawn opaque: their "transparent" texels are seen. There the
         # original colours are kept (upscaled as they are); the filled ones
         # only where the texture is opaque, so edges get no dark fringe.
-        raw = esrgan(exe, model, scale, wrap_pad(im.convert("RGB"), p), tmp) if levels != {255} else None
+        raw = esrgan(exe, model, scale, padded(im.convert("RGB"), p, edge), tmp) if levels != {255} else None
         if levels == {255}:
             alpha = Image.new("L", rgb.size, 255)
+        elif alpha_mode == "linear":
+            # Keep authored transparency at the image boundary. The model
+            # can turn a uniform edge into a darker, irregular blend band.
+            alpha = padded(a, p, edge).resize(rgb.size, Image.Resampling.BILINEAR)
         elif levels <= {0, 255}:
             # A cut-out (alpha test): a smooth outline, cut cleanly at half.
-            soft = wrap_pad(a, p).resize(rgb.size, Image.BICUBIC)
+            soft = padded(a, p, edge).resize(rgb.size, Image.BICUBIC)
             alpha = soft.point(lambda v: max(0, min(255, (v - 128) * 6 + 128)))
         else:
-            alpha = esrgan(exe, model, scale, wrap_pad(a.convert("RGB"), p), tmp).convert("L")
+            alpha = esrgan(exe, model, scale, padded(a.convert("RGB"), p, edge), tmp).convert("L")
     if raw is not None:
         rgb = Image.composite(rgb, raw, alpha.point(lambda v: 255 if v > 16 else 0))
     box = (p * scale, p * scale, (p + w) * scale, (p + h) * scale)
@@ -130,6 +147,10 @@ def main():
     ap.add_argument("--scale", type=int, default=4)
     ap.add_argument("--min", type=int, default=32)
     ap.add_argument("--jobs", type=int, default=2)
+    ap.add_argument("--edge", choices=("wrap", "clamp"), default="wrap",
+                    help="wrap repeating textures; clamp panorama and UI edges")
+    ap.add_argument("--alpha", choices=("model", "linear"), default="model",
+                    help="use linear alpha for authored panorama blend bands")
     ap.add_argument("--esrgan", default=os.path.join(ROOT, "textures/.tools/realesrgan/realesrgan-ncnn-vulkan"))
     a = ap.parse_args()
     if a.setup:
@@ -143,7 +164,8 @@ def main():
         im = Image.open(src)
         if min(im.size) < a.min:
             return f"{n}: {im.size[0]}x{im.size[1]}, skipped"
-        upscale(src, os.path.join(a.out, os.path.basename(n)), a.esrgan, a.model, a.scale)
+        upscale(src, os.path.join(a.out, os.path.basename(n)), a.esrgan, a.model,
+                a.scale, a.edge, a.alpha)
         return f"{n}: {im.size[0]}x{im.size[1]} -> x{a.scale}"
 
     # Each image runs its own Real-ESRGAN process.

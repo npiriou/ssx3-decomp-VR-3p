@@ -151,6 +151,27 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   textures remain visibly coarse, especially in enclosed side views. The
   texture sequences came from the frame dump's matrix/draw inspection
   (`SSX3_VR_INSPECT_MATRICES=1` now prints each sky draw's texture IDs).
+- A local VR-only Gravitude sky pack now contains nine 1024×512 restorations
+  of the disc's 256×128 panorama textures. The repository's Real-ESRGAN
+  tool gained `--edge clamp --alpha linear`: it preserves the original
+  silhouette and the top-row alpha (72/255 in four panels). Its default
+  wrapping/model-alpha path made a dark curved boundary in a frozen frame;
+  the clamped path removes that boundary. Frozen frame-1000 1920-square
+  stereo captures were inspected at 0°, -90°, +90° and 180°; both eyes
+  remained filled and distinct. With the pack, a muted live-game offline
+  run through frame 1002 measured 60.0 game ticks/s, 71.8 stereo
+  submissions/s and 59.6 fresh images/s over frames 420–1002. The nine
+  derived PNGs live in git-ignored `textures/vr-replace`, loaded only by
+  the VR executable when present. The desktop textures remain untouched.
+  The distant mountains are sharper; close snow geometry and its 128×128
+  textures remain visibly coarse. The headset image remains unverified.
+  To regenerate the pack from an `SSX3_TEX_DUMP=textures/dump` Gravitude
+  run, use the portable Real-ESRGAN executable documented in
+  [`tools/upscale-textures.py`](../../tools/upscale-textures.py):
+
+  ```powershell
+  python tools/upscale-textures.py --dump textures/dump --out textures/vr-replace --esrgan textures/.tools/realesrgan/realesrgan-ncnn-vulkan.exe --model realesrgan-x4plus --edge clamp --alpha linear --jobs 1 2e1883ea3e3234e9 3a6f7b87a7fff1fa 495b17680be14ec7 961cbc35f32993aa a38a73d21917a5f5 b4befe89e8aaa8c5 bbbbb9e865d7dc34 bbf9cab272b33e27 bc3014b1fd28cc91
+  ```
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it

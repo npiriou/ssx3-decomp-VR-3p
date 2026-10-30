@@ -124,13 +124,17 @@ Read once at start (environment only):
 
 `tools/upscale-textures.py` makes such a pack with AI upscaling (Real-ESRGAN with the
 UltraSharp model, 4×; `--setup` downloads them into `textures/.tools`): it keeps tiling
-textures seamless and upscales alpha separately. Replaced textures get mipmaps and
-anisotropic filtering.
+textures seamless and upscales alpha separately. For non-repeating sky panels,
+`--edge clamp --alpha linear` preserves the authored blend at the image edges.
+Replaced textures get mipmaps and anisotropic filtering.
 
 The VR executable enables `SSX3_VR_TEXTURES=1` by default. This bundles a traced,
 high-resolution replacement for Gravitude's close overhead chevrons; `0` disables
-it. A file with the same texture name in `SSX3_TEX_REPLACE` takes precedence, and
-`SSX3_TEX_REPLACE=0` disables all replacements.
+it. When `textures/vr-replace` exists, VR uses that local pack automatically;
+the desktop game keeps `textures/replace`. A file with the same texture name
+in an explicit `SSX3_TEX_REPLACE` takes precedence, and
+`SSX3_TEX_REPLACE=0` disables all replacements. The local Gravitude sky pack
+is generated from the owner's disc; see [`plans/vr-redesign.md`](plans/vr-redesign.md).
 
 Alpha in the PNGs is the GS's doubled (255 = opaque). Render targets, the frame-feedback
 passes and movie frames are not textures and are not dumped. `textures/` is ignored by git
