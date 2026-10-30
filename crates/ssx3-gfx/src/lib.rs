@@ -107,6 +107,7 @@ pub struct Inner {
     ui_targets: Option<Targets>,
     rts: HashMap<u32, RtTarget>,
     gs: gs::Gs,
+    terrain_geometry: terrain_vr::GeometryCache,
     vu: Box<[u8; 16384]>,
     texcache: HashMap<tex::TexKey, CachedTex>,
     /// The terrain bake's textures blurred (real-time lighting, flag 32768).
@@ -329,6 +330,7 @@ impl Renderer {
                 ui_targets: None,
                 rts: HashMap::new(),
                 gs: gs::Gs::new(),
+                terrain_geometry: Default::default(),
                 vu: Box::new([0; 16384]),
                 texcache: HashMap::new(),
                 bake_blur,
@@ -1223,6 +1225,7 @@ impl Inner {
     fn take_build(&mut self) -> Build {
         Build {
             gs: std::mem::take(&mut self.gs),
+            terrain_geometry: std::mem::take(&mut self.terrain_geometry),
             vu: std::mem::replace(&mut self.vu, Box::new([0; 16384])),
             stats: self.stats,
             phase1_end: self.phase1_end,
@@ -1235,6 +1238,7 @@ impl Inner {
 
     fn put_build(&mut self, b: Build) {
         self.gs = b.gs;
+        self.terrain_geometry = b.terrain_geometry;
         self.vu = b.vu;
         self.stats = b.stats;
         self.phase1_end = b.phase1_end;
@@ -3392,6 +3396,7 @@ impl VuReceiver {
 #[derive(Clone)]
 struct Build {
     gs: gs::Gs,
+    terrain_geometry: terrain_vr::GeometryCache,
     vu: Box<[u8; 16384]>,
     stats: Stats,
     phase1_end: usize,
@@ -3634,6 +3639,8 @@ impl Build {
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite() && *v >= 0.0)
             .unwrap_or(10.0);
+        let terrain_geometry_cache =
+            std::env::var("SSX3_VR_TERRAIN_GEOMETRY_CACHE").as_deref() != Ok("0");
         std::thread::scope(|sc| {
             // The helper workers (the browser) take every chunk up front;
             // without threads, this thread does.
@@ -3743,6 +3750,10 @@ impl Build {
                                             coeffs,
                                             projected.as_ref(),
                                             terrain_error,
+                                            vu_call
+                                                .terrain_patch
+                                                .filter(|_| terrain_geometry_cache),
+                                            &mut b.terrain_geometry,
                                             &mut terrain_gpu_mesh,
                                             &mut terrain_remaining,
                                             &mut terrain_stats,
@@ -3959,6 +3970,13 @@ impl Build {
             eprintln!(
                 "[vr-terrain-mesh:{terrain_mode}] triangle errors >=1/2/5/10/20/40 px: {:?}",
                 terrain_stats.error_bins
+            );
+            eprintln!(
+                "[vr-terrain-cache] geometry hits {} misses {}, edge hits {} misses {}",
+                terrain_stats.geometry_hits,
+                terrain_stats.geometry_misses,
+                terrain_stats.edge_hits,
+                terrain_stats.edge_misses
             );
         }
         if terrain_stats.timed {

@@ -38,6 +38,31 @@ struct Choice {
     curved: HashSet<(u32, u32)>,
 }
 
+#[derive(Clone, Copy)]
+struct EdgeGeometry {
+    linear: [f32; 4],
+    midpoint: [f32; 4],
+}
+
+/// The native patch mesh is rebuilt for each game frame, but its source
+/// positions, patch coordinates and cubic coefficients usually stay fixed.
+/// Keep the expensive curve samples across frames; the eye projection is
+/// still evaluated anew for every tracked view.
+#[derive(Clone, Default)]
+pub struct GeometryCache {
+    patches: HashMap<u32, Vec<Geometry>>,
+}
+
+#[derive(Clone)]
+struct Geometry {
+    coeff_bits: [[u32; 4]; 16],
+    coeffs: Coeffs,
+    source: Vec<(Q, u32)>,
+    valid: Vec<bool>,
+    /// Edges in a strip have source-index distance one or two.
+    edges: Vec<Option<EdgeGeometry>>,
+}
+
 #[derive(Default)]
 pub struct Stats {
     pub patches: usize,
@@ -57,6 +82,10 @@ pub struct Stats {
     pub valid_ns: u128,
     pub error_ns: u128,
     pub join_ns: u128,
+    pub geometry_hits: usize,
+    pub geometry_misses: usize,
+    pub edge_hits: usize,
+    pub edge_misses: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -153,33 +182,15 @@ fn shared_border(a: [f32; 2], b: [f32; 2]) -> bool {
 
 /// Error in a nominal 1024-pixel eye between a coarse triangle edge and the
 /// exact cubic midpoint. Reject vertices that do not map to this patch.
-fn edge_error(
-    data: &[Q],
-    c: &Coeffs,
-    a: usize,
-    b: usize,
-    projects: &[ScreenProject; 2],
-) -> Option<f32> {
-    let (pa, pb) = (params(data, a)?, params(data, b)?);
-    let (va, vb) = (point(data, a), point(data, b));
-    let linear = blend3(va, vb, 0.5);
-    let mut midpoint = if shared_border(pa, pb) {
-        linear
-    } else {
-        eval(c, [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5])
-    };
-    // The VU's `sqc2` masks out the cubic's W lane. The grid's W (usually
-    // 1) is retained even though the coefficient's unused W polynomial is
-    // not constant.
-    midpoint[3] = linear[3];
-    if midpoint == linear {
+fn edge_error(edge: EdgeGeometry, projects: &[ScreenProject; 2]) -> Option<f32> {
+    if edge.midpoint == edge.linear {
         return Some(0.0);
     }
     projects
         .iter()
         .filter_map(|&project| {
-            let x = screen(project, linear)?;
-            let y = screen(project, midpoint)?;
+            let x = screen(project, edge.linear)?;
+            let y = screen(project, edge.midpoint)?;
             let d = (x[0] - y[0]).hypot(x[1] - y[1]);
             d.is_finite().then_some(d)
         })
@@ -198,6 +209,80 @@ fn valid_vertex(data: &[Q], c: &Coeffs, v: usize) -> bool {
         .map(|i| (original[i] - exact[i]).abs())
         .fold(0.0, f32::max);
     delta.is_finite() && delta < 1.0
+}
+
+impl Geometry {
+    fn new(data: &[Q], coeff_bits: &[[u32; 4]; 16]) -> Self {
+        let coeffs = decode(coeff_bits);
+        let nv = data.len() / 3;
+        Self {
+            coeff_bits: *coeff_bits,
+            coeffs,
+            source: data.chunks_exact(3).map(|v| (v[0], v[2][3])).collect(),
+            valid: (0..nv).map(|v| valid_vertex(data, &coeffs, v)).collect(),
+            edges: vec![None; 2 * nv],
+        }
+    }
+
+    fn matches(&self, data: &[Q], coeff_bits: &[[u32; 4]; 16]) -> bool {
+        self.coeff_bits == *coeff_bits
+            && data.len() == 3 * self.source.len()
+            && data
+                .chunks_exact(3)
+                .zip(&self.source)
+                .all(|(v, &(position, param))| v[0] == position && v[2][3] == param)
+    }
+
+    fn edge(&mut self, data: &[Q], a: usize, b: usize, stats: &mut Stats) -> Option<EdgeGeometry> {
+        let lo = a.min(b);
+        let delta = a.max(b) - lo;
+        if !(1..=2).contains(&delta) {
+            return None;
+        }
+        let slot = 2 * lo + delta - 1;
+        if let Some(edge) = self.edges[slot] {
+            stats.edge_hits += 1;
+            return Some(edge);
+        }
+        let (pa, pb) = (params(data, a)?, params(data, b)?);
+        let linear = blend3(point(data, a), point(data, b), 0.5);
+        let mut midpoint = if shared_border(pa, pb) {
+            linear
+        } else {
+            eval(&self.coeffs, [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5])
+        };
+        // VU `sqc2` masks the cubic W lane; the grid keeps its own W.
+        midpoint[3] = linear[3];
+        let edge = EdgeGeometry { linear, midpoint };
+        self.edges[slot] = Some(edge);
+        stats.edge_misses += 1;
+        Some(edge)
+    }
+}
+
+impl GeometryCache {
+    fn get(
+        &mut self,
+        patch: u32,
+        data: &[Q],
+        coeffs: &[[u32; 4]; 16],
+        stats: &mut Stats,
+    ) -> &mut Geometry {
+        if self.patches.len() >= 512 && !self.patches.contains_key(&patch) {
+            self.patches.clear();
+        }
+        let variants = self.patches.entry(patch).or_default();
+        if let Some(i) = variants.iter().position(|g| g.matches(data, coeffs)) {
+            stats.geometry_hits += 1;
+            return &mut variants[i];
+        }
+        stats.geometry_misses += 1;
+        if variants.len() >= 3 {
+            variants.remove(0);
+        }
+        variants.push(Geometry::new(data, coeffs));
+        variants.last_mut().unwrap()
+    }
 }
 
 fn edge_key(data: &[Q], a: usize, b: usize) -> (u32, u32) {
@@ -271,6 +356,7 @@ impl Mesh {
         c: &[[u32; 4]; 16],
         eyes: &[EyeProject; 2],
         threshold: f32,
+        cache: Option<(&mut GeometryCache, u32)>,
         remaining: &mut usize,
         stats: &mut Stats,
     ) -> Option<Choice> {
@@ -299,10 +385,11 @@ impl Mesh {
         }
         stats.visible_sources += 1;
         let start = stats.timed.then(std::time::Instant::now);
-        let decoded = decode(c);
-        let valid: Vec<_> = (0..nv)
-            .map(|v| valid_vertex(&source.data, &decoded, v))
-            .collect();
+        let mut uncached = None;
+        let geometry = match cache {
+            Some((cache, patch)) => cache.get(patch, &source.data, c, stats),
+            None => uncached.insert(Geometry::new(&source.data, c)),
+        };
         if let Some(start) = start {
             stats.valid_ns += start.elapsed().as_nanos();
         }
@@ -320,7 +407,7 @@ impl Mesh {
                 }
                 let verts = [i as usize - 2, i as usize - 1, i as usize];
                 stats.candidates += 1;
-                let error = if verts.iter().all(|&v| valid[v]) {
+                let error = if verts.iter().all(|&v| geometry.valid[v]) {
                     let mut measured = false;
                     let mut error = 0.0f32;
                     for (a, b) in [
@@ -328,9 +415,11 @@ impl Mesh {
                         (verts[1], verts[2]),
                         (verts[2], verts[0]),
                     ] {
-                        if let Some(e) = edge_error(&source.data, &decoded, a, b, &projects) {
-                            measured = true;
-                            error = error.max(e);
+                        if let Some(edge) = geometry.edge(&source.data, a, b, stats) {
+                            if let Some(e) = edge_error(edge, &projects) {
+                                measured = true;
+                                error = error.max(e);
+                            }
                         }
                     }
                     if measured {
@@ -400,7 +489,7 @@ impl Mesh {
         remaining: &mut usize,
         stats: &mut Stats,
     ) -> Option<(Self, Vec<Q>)> {
-        let choice = Self::choose(calls, c, eyes, 0.7, remaining, stats)?;
+        let choice = Self::choose(calls, c, eyes, 0.7, None, remaining, stats)?;
         let decoded = decode(c);
         let source = calls.first()?;
         let mut data = source.data.clone();
@@ -529,11 +618,21 @@ impl GpuMesh {
         coeffs: &[[u32; 4]; 16],
         eyes: &[EyeProject; 2],
         threshold: f32,
+        patch: Option<u32>,
+        geometry_cache: &mut GeometryCache,
         remaining: &mut usize,
         stats: &mut Stats,
     ) -> Option<(Self, Vec<Q>)> {
         let start = stats.timed.then(std::time::Instant::now);
-        let choice = Mesh::choose(calls, coeffs, eyes, threshold, remaining, stats);
+        let choice = Mesh::choose(
+            calls,
+            coeffs,
+            eyes,
+            threshold,
+            patch.map(|patch| (geometry_cache, patch)),
+            remaining,
+            stats,
+        );
         if let Some(start) = start {
             stats.choose_ns += start.elapsed().as_nanos();
         }
@@ -611,6 +710,8 @@ fn gpu_group(
     coeffs: Option<&[[u32; 4]; 16]>,
     eyes: Option<&[EyeProject; 2]>,
     threshold: f32,
+    patch: Option<u32>,
+    geometry_cache: &mut GeometryCache,
     cache: &mut Option<GpuMesh>,
     remaining: &mut usize,
     stats: &mut Stats,
@@ -619,9 +720,18 @@ fn gpu_group(
         return group;
     }
     if matches!(group[0].link, Link::Source(bz::KEY)) {
-        let built = coeffs
-            .zip(eyes)
-            .and_then(|(c, eyes)| GpuMesh::build(&group, c, eyes, threshold, remaining, stats));
+        let built = coeffs.zip(eyes).and_then(|(c, eyes)| {
+            GpuMesh::build(
+                &group,
+                c,
+                eyes,
+                threshold,
+                patch,
+                geometry_cache,
+                remaining,
+                stats,
+            )
+        });
         if let Some((mesh, midpoints)) = built {
             group[0].data.extend_from_slice(&midpoints);
             *cache = Some(mesh);
@@ -660,6 +770,8 @@ pub fn refine_calls_gpu(
     coeffs: Option<&[[u32; 4]; 16]>,
     eyes: Option<&[EyeProject; 2]>,
     threshold: f32,
+    patch: Option<u32>,
+    geometry_cache: &mut GeometryCache,
     cache: &mut Option<GpuMesh>,
     remaining: &mut usize,
     stats: &mut Stats,
@@ -673,6 +785,8 @@ pub fn refine_calls_gpu(
                 coeffs,
                 eyes,
                 threshold,
+                patch,
+                geometry_cache,
                 cache,
                 remaining,
                 stats,
@@ -681,7 +795,15 @@ pub fn refine_calls_gpu(
         group.push(call);
     }
     result.extend(gpu_group(
-        group, coeffs, eyes, threshold, cache, remaining, stats,
+        group,
+        coeffs,
+        eyes,
+        threshold,
+        patch,
+        geometry_cache,
+        cache,
+        remaining,
+        stats,
     ));
     *calls = result;
 }
@@ -800,5 +922,26 @@ mod tests {
         assert_eq!(refined.indices.len(), 12);
         assert_eq!(refined.indices[0], (1 << 16) | (2 << 4));
         assert_eq!(refined.indices[11], (1 << 16) | (2 << 4) | 11);
+    }
+
+    #[test]
+    fn geometry_cache_tracks_patch_data_and_coefficients() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&source_vertex(0.0, 0, 0));
+        data.extend_from_slice(&source_vertex(1.0, 32767, 0));
+        data.extend_from_slice(&source_vertex(0.0, 0, 32767));
+        let mut coeffs = [[0; 4]; 16];
+        let mut cache = GeometryCache::default();
+        let mut stats = Stats::default();
+        cache.get(0x10_0000, &data, &coeffs, &mut stats);
+        cache.get(0x10_0000, &data, &coeffs, &mut stats);
+        assert_eq!((stats.geometry_hits, stats.geometry_misses), (1, 1));
+        data[0][0] = 0.25f32.to_bits();
+        cache.get(0x10_0000, &data, &coeffs, &mut stats);
+        coeffs[13][0] = 1.0f32.to_bits();
+        cache.get(0x10_0000, &data, &coeffs, &mut stats);
+        data[2][3] ^= 1;
+        cache.get(0x10_0000, &data, &coeffs, &mut stats);
+        assert_eq!((stats.geometry_hits, stats.geometry_misses), (1, 4));
     }
 }

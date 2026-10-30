@@ -295,6 +295,19 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   a busier machine fell to 51.7/s while the default path also fell to
   58.2/s. Refinement remains opt-in. Neither 60 fresh images/s with terrain
   refinement nor the headset pacing gate is established.
+- The experimental GPU mesh now caches each patch's decoded coefficients,
+  source positions, patch coordinates, validity and cubic edge midpoints.
+  It reuses an entry only when those source values match exactly; the two
+  tracked-eye projections are still recomputed each frame. On the repeated
+  Gravitude side frame, 78 patch entries and 7530 edge samples were reused
+  after the first frame. Selection fell from roughly 0.9 to 0.7 ms with
+  cache disabled/enabled, and the forward/side stereo images were identical
+  pixel-for-pixel in both eyes. Near the end of a muted live Gravitude run,
+  about 190 patches per frame were reused with 0–7 misses. Adjacent live
+  1920-square runs measured 3.37 versus 3.22 ms build time per rendered
+  frame, while fresh stereo rates were 59.3 versus 59.4/s over race frames
+  420–650; the rate difference is within measurement variation. The mesh
+  stays opt-in and the headset gate remains open.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it
