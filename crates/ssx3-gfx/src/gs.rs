@@ -1260,6 +1260,19 @@ impl Gs {
                         a[3].max(b[3]),
                     ]
                 });
+                // A merged GPU draw must carry every strip's depth range as
+                // well as its screen rectangle. VR DATE snapshot bounds use
+                // this box for the whole draw, not just its first call.
+                g.vr_box = g.vr_box.zip(gb.vr_box).map(|(a, b)| {
+                    [
+                        a[0].min(b[0]),
+                        a[1].min(b[1]),
+                        a[2].max(b[2]),
+                        a[3].max(b[3]),
+                        a[4].min(b[4]),
+                        a[5].max(b[5]),
+                    ]
+                });
             }
             _ => self.batches.push(Batch {
                 state: st,

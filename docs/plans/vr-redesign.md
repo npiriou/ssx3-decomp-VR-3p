@@ -296,6 +296,22 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   715% to 279% of a rendered frame per draw and the average colour
   snapshots from 7.2 to 5.0. Fresh stereo rates were 59.7 and 60.0/s over
   frames 420–650; this small timing difference is within run variation.
+  A later frame-650 Gravitude diagnosis found that merging adjacent type-3
+  strip calls kept only the first call's 3D bound. In the forward 1920-square
+  stereo replay, this skipped visible pixels: the bounded result differed
+  from full-frame snapshots at 2,951 left-eye and 2,955 right-eye pixels.
+  The merge now unions all six bound components across the calls. CPU
+  triangles crossing the tracked eye's clip planes are bounded after
+  homogeneous clipping, rather than forcing a full-frame copy. With both
+  fixes, frame-650 forward and +90° stereo views and -90°/180° mono views
+  match full-frame snapshots pixel-for-pixel. +90° stereo views of Snow Jam
+  frame 1500 and Intimidator frame 1000 also match in both eyes. On the
+  repeated +90° Gravitude stereo
+  frame, copied colour area fell from 720% of an eye under the old bounded
+  renderer to 453%; measured render time varied and does not establish an
+  FPS gain. A muted 650-tick offline race with a 90° turn measured 59.8 game
+  ticks/s, 69.7 stereo submissions/s and 57.8 fresh stereo images/s over
+  frames 420–650. Both final eyes were filled and distinct. G3 remains open.
 - The mesh selector now composes the eye projection once per patch. Frozen
   forward and side stereo captures with GPU refinement remained pixel-identical.
   On one repeated Gravitude side frame, selecting about 114 of 2510 candidate

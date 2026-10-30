@@ -732,16 +732,21 @@ impl ssx3_ps2::frame_sink::FrameSink for Renderer {
     }
 }
 
-/// Conservative eye-space bounds for a CPU triangle list. When every vertex
-/// has positive eye W, each triangle's projected interior lies inside its
-/// projected vertex bounds; otherwise the caller keeps the full scissor.
+/// Conservative eye-space bounds for a CPU triangle list. Clip each triangle
+/// to the tracked eye's homogeneous frustum before dividing by W. A vertex
+/// behind the eye can still leave a small visible triangle, so treating its
+/// whole batch as full-screen wastes a destination-alpha snapshot.
 fn vr_cpu_bounds(
     vertices: &[gs::Vtx],
     matrix: [[f32; 4]; 4],
     game_size: (u32, u32),
 ) -> Option<[f32; 4]> {
     let (w, h) = (game_size.0 as f32, game_size.1 as f32);
+    if vertices.is_empty() || vertices.len() % 3 != 0 {
+        return None;
+    }
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    let mut all_in_front = true;
     for vertex in vertices {
         let p = vertex.pos;
         let game_clip = [
@@ -751,8 +756,12 @@ fn vr_cpu_bounds(
             1.0,
         ];
         let eye = vr::transform(matrix, game_clip);
-        if !(eye[3] > 0.0) || !eye.iter().all(|v| v.is_finite()) {
+        if !eye.iter().all(|v| v.is_finite()) {
             return None;
+        }
+        if !(eye[3] > 0.0) {
+            all_in_front = false;
+            break;
         }
         let x = (eye[0] / eye[3] + 1.0) * w * 0.5 - 0.5;
         let y = (1.0 - eye[1] / eye[3]) * h * 0.5 - 0.5;
@@ -766,7 +775,125 @@ fn vr_cpu_bounds(
             bounds[3].max(y),
         ];
     }
-    (bounds[0] <= bounds[2]).then_some(bounds)
+    if all_in_front {
+        return Some(bounds);
+    }
+    bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    // The vertex shader maps eye clip Z from [-W, W] into wgpu's [0, W].
+    // Intersect against those same six planes, including the eye's near
+    // plane, before perspective division.
+    let plane = |p: [f32; 4], side: usize| match side {
+        0 => p[0] + p[3],
+        1 => p[3] - p[0],
+        2 => p[1] + p[3],
+        3 => p[3] - p[1],
+        4 => p[2] + p[3],
+        _ => p[3] - p[2],
+    };
+    let mut visible = false;
+    for tri in vertices.chunks_exact(3) {
+        let mut polygon = Vec::with_capacity(9);
+        for vertex in tri {
+            let p = vertex.pos;
+            let game_clip = [
+                2.0 * (p[0] + 0.5) / w - 1.0,
+                1.0 - 2.0 * (p[1] + 0.5) / h,
+                1.0 - 2.0 * p[2],
+                1.0,
+            ];
+            let eye = vr::transform(matrix, game_clip);
+            if !eye.iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            polygon.push(eye);
+        }
+        for side in 0..6 {
+            if polygon.is_empty() {
+                break;
+            }
+            let mut clipped = Vec::with_capacity(polygon.len() + 2);
+            let mut previous = *polygon.last().unwrap();
+            let mut previous_distance = plane(previous, side);
+            for &current in &polygon {
+                let current_distance = plane(current, side);
+                if (previous_distance >= 0.0) != (current_distance >= 0.0) {
+                    let t = previous_distance / (previous_distance - current_distance);
+                    clipped.push(std::array::from_fn(|i| {
+                        previous[i] + t * (current[i] - previous[i])
+                    }));
+                }
+                if current_distance >= 0.0 {
+                    clipped.push(current);
+                }
+                previous = current;
+                previous_distance = current_distance;
+            }
+            polygon = clipped;
+        }
+        for eye in polygon {
+            if !(eye[3] > 0.0) {
+                return None;
+            }
+            let x = (eye[0] / eye[3] + 1.0) * w * 0.5 - 0.5;
+            let y = (1.0 - eye[1] / eye[3]) * h * 0.5 - 0.5;
+            if !x.is_finite() || !y.is_finite() {
+                return None;
+            }
+            visible = true;
+            bounds = [
+                bounds[0].min(x),
+                bounds[1].min(y),
+                bounds[2].max(x),
+                bounds[3].max(y),
+            ];
+        }
+    }
+    // A fully clipped batch has no destination-alpha pixels to snapshot.
+    Some(if visible {
+        bounds
+    } else {
+        [w + 16.0, h + 16.0, w + 16.0, h + 16.0]
+    })
+}
+
+#[cfg(test)]
+mod vr_cpu_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn triangle_crossing_behind_eye_keeps_a_bounded_visible_region() {
+        let vertices = [
+            [100.0, 220.0, 0.5],
+            [450.0, 220.0, 0.5],
+            [500.0, 230.0, 0.5],
+        ]
+        .map(|pos| gs::Vtx {
+            pos,
+            ..Default::default()
+        });
+        let mut eye = vr::IDENTITY;
+        eye[0][3] = 1.0;
+        eye[3][3] = 0.5;
+        let bounds = vr_cpu_bounds(&vertices, eye, (640, 448)).unwrap();
+        assert!(bounds[0] <= 1.0);
+        assert!(bounds[2] > 300.0);
+        assert!(bounds[1] > 0.0 && bounds[3] < 448.0);
+    }
+
+    #[test]
+    fn completely_clipped_triangle_has_no_snapshot_area() {
+        let vertices =
+            [[10.0, 10.0, 0.5], [20.0, 10.0, 0.5], [10.0, 20.0, 0.5]].map(|pos| gs::Vtx {
+                pos,
+                ..Default::default()
+            });
+        let mut eye = vr::IDENTITY;
+        eye[3][3] = -1.0;
+        assert_eq!(
+            vr_cpu_bounds(&vertices, eye, (640, 448)),
+            Some([656.0, 464.0, 656.0, 464.0])
+        );
+    }
 }
 
 /// Project a strip's conservative game-screen box. The shader's 1/16-pixel
@@ -2867,7 +2994,7 @@ impl Inner {
                 ];
             }
             if let (Some((px, py)), Some(pb)) = (probe, probe_buf.as_ref()) {
-                if it.target == main {
+                if it.target == main && px < t.w && py < t.h {
                     drop(pass);
                     enc.copy_texture_to_buffer(
                         wgpu::TexelCopyTextureInfo {
