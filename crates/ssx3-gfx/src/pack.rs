@@ -45,6 +45,11 @@ pub struct Pack {
 
 const VR_GRAVITUDE_CHEVRONS: &[u8] =
     include_bytes!("../../../assets/vr-textures/d5c495a1196f376d.png");
+const VR_GRAVITUDE_ROCK: &[u8] = include_bytes!("../../../assets/vr-textures/b971a7abaf011a26.png");
+const VR_BUILTINS: [(&str, &[u8]); 2] = [
+    ("d5c495a1196f376d", VR_GRAVITUDE_CHEVRONS),
+    ("b971a7abaf011a26", VR_GRAVITUDE_ROCK),
+];
 
 impl Pack {
     pub fn from_env() -> Pack {
@@ -107,6 +112,21 @@ impl Pack {
                 used += bytes;
                 preloaded.insert(name, Arc::new(levels));
             }
+            for (name, png) in VR_BUILTINS {
+                if replace.contains_key(name) {
+                    continue;
+                }
+                let Ok((w, h, rgba)) = decode_png(std::io::Cursor::new(png)) else {
+                    continue;
+                };
+                let levels = decoded_mips(w, h, rgba);
+                let bytes: usize = levels.iter().map(|d| d.rgba.len() * 4).sum();
+                if used + bytes > BUDGET {
+                    continue;
+                }
+                used += bytes;
+                preloaded.insert(name.to_owned(), Arc::new(levels));
+            }
             if !preloaded.is_empty() {
                 eprintln!(
                     "[gfx] preloaded {} VR textures ({:.1} MiB decoded)",
@@ -156,8 +176,11 @@ impl Pack {
         }
         let source = if let Some(path) = self.replace.get(&name) {
             read_png(path)
-        } else if self.vr_replacements && name == "d5c495a1196f376d" {
-            decode_png(std::io::Cursor::new(VR_GRAVITUDE_CHEVRONS))
+        } else if self.vr_replacements {
+            let Some((_, png)) = VR_BUILTINS.iter().find(|(stem, _)| *stem == name) else {
+                return None;
+            };
+            decode_png(std::io::Cursor::new(*png))
         } else {
             return None;
         };
@@ -269,6 +292,13 @@ mod tests {
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         assert!(rgba.chunks_exact(4).any(|p| p[3] < 128));
         assert!(rgba.chunks_exact(4).any(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn bundled_vr_rock_is_an_opaque_high_resolution_square() {
+        let (w, h, rgba) = decode_png(std::io::Cursor::new(VR_GRAVITUDE_ROCK)).unwrap();
+        assert_eq!((w, h), (1254, 1254));
+        assert!(rgba.chunks_exact(4).all(|p| p[3] == 255));
     }
 
     #[test]

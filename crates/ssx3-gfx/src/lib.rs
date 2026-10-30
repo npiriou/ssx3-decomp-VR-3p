@@ -3795,6 +3795,7 @@ impl Build {
                                 for c in g {
                                     if n == inspect_mesh
                                         && c.program == ssx3_render::gpu::Program::Mat3Mesh
+                                        && c.uniforms[4][2] == 1
                                     {
                                         let positions: Vec<[f32; 3]> = c
                                             .data
@@ -3811,13 +3812,24 @@ impl Build {
                                                 |[lo, hi], p| [lo.min(p[axis]), hi.max(p[axis])],
                                             )
                                         });
+                                        let uv_bounds = std::array::from_fn::<_, 2, _>(|axis| {
+                                            c.data.chunks_exact(4).fold(
+                                                [f32::INFINITY, f32::NEG_INFINITY],
+                                                |[lo, hi], v| {
+                                                    let uv = v[1][axis] as i32 as f32 / 4096.0;
+                                                    [lo.min(uv), hi.max(uv)]
+                                                },
+                                            )
+                                        });
                                         eprintln!(
-                                            "[vr-mesh] draw {} call {:?}: {} vertices, {} indices, bounds {:?}, first {:?}",
+                                            "[vr-mesh] draw {} call {:?}: {} vertices, {} indices, bounds {:?}, uv {:?}, lit {}, first {:?}",
                                             n.unwrap_or_default(),
                                             vu_call.entry,
                                             positions.len(),
                                             c.draw_len(),
                                             bounds,
+                                            uv_bounds,
+                                            c.uniforms[4][0],
                                             &positions[..positions.len().min(4)]
                                         );
                                     }

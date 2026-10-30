@@ -60,7 +60,7 @@ its GPU work. It excludes OpenXR swapchain and headset compositor time.
 | `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
 | `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
 | `SSX3_VR_INSPECT_DRAW=<index>` | With `gfx_replay`, log a frame draw's material, texture IDs and VU/DIRECT calls; use with `SSX3_GFX_PROBE=x,y` to trace a pixel back to its draw and GPU call. |
-| `SSX3_VR_INSPECT_MESH=<index>` | With `gfx_replay`, log the General mesh calls, vertex/index counts and local-coordinate bounds for one draw. `SSX3_GFX_TEXLOG=<frame>` also prints the texture-pack filename beside each decoded texture's info address. |
+| `SSX3_VR_INSPECT_MESH=<index>` | With `gfx_replay`, log the General mesh calls, vertex/index counts, local-coordinate and UV bounds, and lighting flag for one draw. `SSX3_GFX_TEXLOG=<frame>` also prints the texture-pack filename beside each decoded texture's info address. |
 | `SSX3_VR_TERRAIN_SOURCE=0` | Skip VR-only copying of the original Bézier coefficients and per-vertex patch coordinates into published frames (enabled by the VR executable). The default image is unchanged either way. |
 | `SSX3_VR_TERRAIN_VALIDATE=1` | With `gfx_replay` and `SSX3_VR_TERRAIN_SOURCE=1`, count terrain calls whose VU grid corner exactly matches the recorded patch coefficients. |
 | `SSX3_VR_TERRAIN_MESH=cpu\|gpu` | Experimental VR-only Bézier triangle refinement from the original surface, selected by per-eye projected error. `1` aliases `cpu`; `gpu` uploads only selected midpoint positions and assembles the subtriangles in the shader. Off by default while image quality and frame cost are being tuned. Requires `SSX3_VR_TERRAIN_SOURCE=1`. |
@@ -141,8 +141,10 @@ textures seamless and upscales alpha separately. For non-repeating sky panels,
 Replaced textures get mipmaps and anisotropic filtering.
 
 The VR executable enables `SSX3_VR_TEXTURES=1` by default. This bundles a traced,
-high-resolution replacement for Gravitude's close overhead chevrons; `0` disables
-it. When `textures/vr-replace` exists, VR uses that local pack automatically;
+high-resolution replacement for Gravitude's close overhead chevrons and a
+detailed rock albedo derived from the game's 128×128 cliff texture; `0` disables
+the bundled images. When `textures/vr-replace` exists, VR uses that local pack
+automatically;
 the desktop game keeps `textures/replace`. A file with the same texture name
 in an explicit `SSX3_TEX_REPLACE` takes precedence, and
 `SSX3_TEX_REPLACE=0` disables all replacements. The local Gravitude sky pack

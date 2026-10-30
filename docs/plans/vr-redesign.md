@@ -497,6 +497,22 @@ remained poor. Removing the cliff revealed a snowy background but erased real
 course geometry; front-face culling likewise left holes. No mesh experiment
 was installed. A source-space silhouette and material solution remains G1 work.
 
+The offending General draw has six unlit source meshes of 40–48 vertices.
+Their UVs cover most of a single 128×128 rock tile across a large wall. A
+1254-square grayscale rock albedo generated from that original tile is now
+bundled in the VR executable. It preserves the game's blue vertex tint and
+adds visible close-view detail in frame-650 side and frame-1000 forward stereo
+captures. The side silhouette is unchanged and still coarse. In adjacent
+muted 1920-square 650-tick offline runs with a 90-degree turn, race frames
+420–651 measured 59.5 fresh stereo images/s with the original rock and 60.0/s
+with the detailed albedo, a difference within run variation. The bundled image
+is predecoded with the local VR pack; that path reproduced both eyes of the
+explicit trial pack byte-for-byte. An explicit file with the same texture hash
+still takes precedence. The rebuilt VR executable's default-pack offline run
+measured 59.6 fresh stereo images/s over frames 420–651, with both eyes filled
+and distinct. This improves one material but does not close G1 or prove the
+SteamVR frame-rate gate.
+
 ### Gravitude upper-sky joins (2026-10-31)
 
 The upper panorama consists of four 45-degree strips, three contiguous over
