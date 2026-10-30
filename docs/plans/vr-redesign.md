@@ -546,8 +546,31 @@ per eye in the same view and was omitted. A muted live 650-tick run reused
 420–650 measured 55.9 fresh stereo images/s, but an adjacent control run
 hit a long refresh and measured 44.8/s, so these runs do not establish the
 trial's live cost. The large rock UVs remain visibly stretched, and source
-geometry is still coarse. This remains off by default; G1, G3 and headset
-review remain open.
+geometry is still coarse. This trial was initially kept off; G1, G3 and
+headset review remained open.
+
+The Gravitude rock path now enables the 0.7 source-space smoothing by default
+in VR and maps its detailed albedo onto each source triangle's dominant local
+plane, four texture repeats per local unit. Projection seams duplicate vertex
+records but keep the resulting position, colour, draw order and stereo geometry;
+the tiling is available on the first frame while the multi-call smooth mesh
+cache warms. The frame-650 +90° cliff has less stretched surface texture and
+a softer outline, although its blue material and some large-scale streaks
+remain. Frozen 1920-square stereo forward frame 1000 and +90° frame 650 have
+filled, distinct eyes; the UI is unchanged. With both VR settings set to zero,
+the side eyes and UI match the prior renderer byte-for-byte, and the desktop
+frame is byte-identical with the new defaults. Frozen ARA1, BRA2, CRA3 and
+DRA4 views did not use this Gravitude rock material. `SSX3_VR_ROCK_SMOOTH=0`
+and `SSX3_VR_ROCK_TILE=0` restore the original VR rock surface.
+
+Adjacent muted 1920-square Gravitude offline runs, both with smoothing 0.7,
+measured 59.1 fresh stereo images/s without tiling and 59.2 with four repeats
+over race frames 420–650/651. The difference is within run variation. Both
+completed a retained +90° refresh with distinct eyes. This one-course material
+improvement does not close G1's overall side/rear coverage or G3's sustained
+SteamVR pacing gate. Two subsequent default-setting runs measured 53.8 and
+60.0 fresh stereo images/s on the same race interval, reinforcing that a
+short offline run is not a sustained frame-rate result.
 
 ### Gravitude upper-sky joins (2026-10-31)
 

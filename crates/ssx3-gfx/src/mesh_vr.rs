@@ -1,7 +1,8 @@
-//! Optional source-space smoothing of unlit Mat3 meshes for VR.
+//! Source-space smoothing and albedo projection of unlit rock meshes for VR.
 //! A Gravitude rock can span several native calls. Weld their original
 //! fixed-point positions before moving any point, so shared edges stay
-//! watertight. One-call groups provide negligible image gain here.
+//! watertight. One-call groups provide negligible smoothing gain here;
+//! their albedo can still be projected without waiting for another frame.
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,6 +27,7 @@ struct Ready {
 #[derive(Clone, Default)]
 pub struct Cache {
     strength_bits: u32,
+    tile_bits: u32,
     ready: HashMap<u64, Vec<Ready>>,
     pending: HashMap<(usize, [Q; 4]), Vec<(u64, GpuCall, bool)>>,
 }
@@ -39,10 +41,11 @@ fn signature(call: &GpuCall) -> u64 {
 }
 
 impl Cache {
-    pub fn begin_frame(&mut self, strength: f32) {
-        if self.strength_bits != strength.to_bits() {
+    pub fn begin_frame(&mut self, strength: f32, tile: f32) {
+        if self.strength_bits != strength.to_bits() || self.tile_bits != tile.to_bits() {
             self.ready.clear();
             self.strength_bits = strength.to_bits();
+            self.tile_bits = tile.to_bits();
         }
         self.pending.clear();
     }
@@ -68,7 +71,8 @@ impl Cache {
             .or_default()
             .push((key, call.clone(), mesh.is_some()));
         let Some(mesh) = mesh else {
-            return false;
+            let tile = f32::from_bits(self.tile_bits);
+            return tile > 0.0 && tile_call(call, tile);
         };
         call.data = mesh.refined.clone();
         call.indices = mesh.refined_indices.clone();
@@ -80,14 +84,34 @@ impl Cache {
     pub fn finish_frame(&mut self) -> Vec<SmoothStats> {
         let mut stats = Vec::new();
         for group in std::mem::take(&mut self.pending).into_values() {
-            if group.len() < 2 || group.iter().all(|(_, _, hit)| *hit) {
+            if group.iter().all(|(_, _, hit)| *hit) {
                 continue;
             }
             let mut calls: Vec<_> = group.iter().map(|(_, call, _)| call.clone()).collect();
-            let Some(stat) = smooth_group(&mut calls, f32::from_bits(self.strength_bits)) else {
-                continue;
+            let strength = f32::from_bits(self.strength_bits);
+            let tile = f32::from_bits(self.tile_bits);
+            let smoothed = if group.len() >= 2 && strength > 0.0 {
+                smooth_group(&mut calls, strength)
+            } else {
+                None
             };
-            stats.push(stat);
+            let tiled = if tile > 0.0 {
+                let mut projected = calls.clone();
+                if projected.iter_mut().all(|call| tile_call(call, tile)) {
+                    calls = projected;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if smoothed.is_none() && !tiled {
+                continue;
+            }
+            if let Some(stat) = smoothed {
+                stats.push(stat);
+            }
             for ((key, old, _), new) in group.into_iter().zip(calls) {
                 let variants = self.ready.entry(key).or_default();
                 if !variants
@@ -120,6 +144,55 @@ fn position(v: &[u32; 4]) -> [f32; 3] {
 
 fn fixed(p: [f32; 3]) -> [u32; 3] {
     p.map(|x| ((x * 32768.0).round() as i32) as u32)
+}
+
+/// Retile the rock's native albedo in source space. Each triangle chooses
+/// its dominant local plane, so a steep face does not stretch one texture
+/// row across the whole cliff. Duplicate records at projection seams while
+/// keeping the original positions, colours and GIF draw order.
+fn tile_call(call: &mut GpuCall, tile: f32) -> bool {
+    let n = call.uniforms[4][1] as usize;
+    if n == 0
+        || call.data.len() != 4 * n
+        || call.indices.is_empty()
+        || call.indices.len() % 3 != 0
+        || call.indices.iter().any(|&i| i as usize >= n)
+    {
+        return false;
+    }
+    let mut data = Vec::with_capacity(call.indices.len() * 4);
+    let mut indices = Vec::with_capacity(call.indices.len());
+    for tri in call.indices.chunks_exact(3) {
+        let p = [tri[0], tri[1], tri[2]].map(|i| position(&call.data[4 * i as usize]));
+        let a = std::array::from_fn::<_, 3, _>(|lane| p[1][lane] - p[0][lane]);
+        let b = std::array::from_fn::<_, 3, _>(|lane| p[2][lane] - p[0][lane]);
+        let normal = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        let major = (0..3)
+            .max_by(|&x, &y| normal[x].abs().total_cmp(&normal[y].abs()))
+            .unwrap();
+        let (u, v) = match major {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        for (&i, point) in tri.iter().zip(p) {
+            let src = &call.data[4 * i as usize..4 * i as usize + 4];
+            let mut record: [[u32; 4]; 4] = src.try_into().unwrap();
+            record[1][0] = ((point[u] * tile * 4096.0).round() as i32) as u32;
+            record[1][1] = ((point[v] * tile * 4096.0).round() as i32) as u32;
+            indices.push((data.len() / 4) as u32);
+            data.extend_from_slice(&record);
+        }
+    }
+    call.uniforms[4][1] = (data.len() / 4) as u32;
+    call.data = data;
+    call.indices = indices;
+    call.mesh_key = None;
+    true
 }
 
 fn midpoint_record(a: &[[u32; 4]], b: &[[u32; 4]], p: [u32; 3]) -> [[u32; 4]; 4] {
@@ -386,12 +459,12 @@ mod tests {
     fn cached_topology_reuses_source_mesh_at_a_new_camera_matrix() {
         let original = [call(&[[0, 1, 2], [0, 3, 1]]), call(&[[0, 2, 3], [1, 3, 2]])];
         let mut cache = Cache::default();
-        cache.begin_frame(0.7);
+        cache.begin_frame(0.7, 0.0);
         for mut call in original.clone() {
             assert!(!cache.transform(7, &mut call));
         }
         assert_eq!(cache.finish_frame().len(), 1);
-        cache.begin_frame(0.7);
+        cache.begin_frame(0.7, 0.0);
         let mut reused = original.clone();
         for call in &mut reused {
             call.uniforms[0][0] = 1.25f32.to_bits();
@@ -411,11 +484,39 @@ mod tests {
         let original = call(&[[0, 1, 2], [0, 2, 3]]);
         let mut cache = Cache::default();
         for _ in 0..2 {
-            cache.begin_frame(0.7);
+            cache.begin_frame(0.7, 0.0);
             let mut actual = original.clone();
             assert!(!cache.transform(7, &mut actual));
             assert_eq!(actual, original);
             assert!(cache.finish_frame().is_empty());
         }
+    }
+
+    #[test]
+    fn rock_projection_treats_steep_faces_as_surfaces() {
+        let mut wall = call(&[[0, 1, 3]]);
+        // This triangle lies in XZ, so its second texture coordinate must
+        // follow height instead of the flat Y that the XY projection sees.
+        assert!(tile_call(&mut wall, 2.0));
+        assert_eq!(wall.indices, [0, 1, 2]);
+        assert_eq!(wall.uniforms[4][1], 3);
+        assert_eq!(wall.data[1][1], 8192);
+        assert_eq!(wall.data[5][1], 0);
+        assert_eq!(wall.data[9][1], 0);
+        assert_eq!(position(&wall.data[0]), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn rock_projection_is_ready_on_the_first_frame() {
+        let mut cache = Cache::default();
+        cache.begin_frame(0.0, 2.0);
+        let mut first = call(&[[0, 1, 3]]);
+        assert!(cache.transform(3, &mut first));
+        assert_eq!(first.data[1][1], 8192);
+        cache.finish_frame();
+        cache.begin_frame(0.0, 2.0);
+        let mut second = call(&[[0, 1, 3]]);
+        assert!(cache.transform(3, &mut second));
+        assert_eq!(second, first);
     }
 }

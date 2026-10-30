@@ -3829,11 +3829,20 @@ impl Build {
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
                 .filter(|&v| v.is_finite() && (0.0..=1.0).contains(&v))
-                .unwrap_or(0.0)
+                .unwrap_or(0.7)
         } else {
             0.0
         };
-        b.mesh_geometry.begin_frame(rock_strength);
+        let rock_tile = if vr_active {
+            std::env::var("SSX3_VR_ROCK_TILE")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|&v| v.is_finite() && (0.0..=8.0).contains(&v))
+                .unwrap_or(4.0)
+        } else {
+            0.0
+        };
+        b.mesh_geometry.begin_frame(rock_strength, rock_tile);
         let refine_terrain = matches!(terrain_mode.as_str(), "1" | "cpu" | "gpu");
         let terrain_reprojections: Vec<Option<[[[f32; 4]; 4]; 2]>> = if refine_terrain {
             built
@@ -3999,7 +4008,7 @@ impl Build {
                                         );
                                     }
                                 }
-                                let rock_draw = (rock_strength > 0.0)
+                                let rock_draw = (rock_strength > 0.0 || rock_tile > 0.0)
                                     .then_some(n)
                                     .flatten()
                                     .filter(|&index| {
@@ -4289,7 +4298,7 @@ impl Build {
             }
             vu.finish(&plan, &mut b.vu);
         });
-        if rock_strength > 0.0 {
+        if rock_strength > 0.0 || rock_tile > 0.0 {
             let prepared = b.mesh_geometry.finish_frame();
             if std::env::var_os("SSX3_VR_ROCK_STATS").is_some() {
                 eprintln!(
