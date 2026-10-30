@@ -361,10 +361,11 @@ fn draw(
     }
     if let Some(out) = gpu {
         let mut strips = gpu::Strips::default();
+        let capture_source = gpu::terrain_source_enabled();
         for (packet, count, off) in [(PACKET_A, s.a, 0), (PACKET_B, s.b, s.b_offset)] {
             strips.packet(packet);
             for strip in grid_strips(g.n, count, pos.wrapping_add(off), uv.wrapping_add(off)) {
-                if std::env::var("SSX3_VR_TERRAIN_SOURCE").is_ok_and(|v| v == "1") {
+                if capture_source {
                     strips.strip_with_params(&strip, |addr| {
                         let index = addr.wrapping_sub(pos) as f32;
                         let n = g.n as f32;

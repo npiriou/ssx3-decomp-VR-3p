@@ -539,7 +539,7 @@ fn draw(m: &mut Mem, pos: u16, uv: u16, kick: &mut dyn FnMut(&[u128]), gpu: Gpu)
                         [row as f32 / 7.0, col as f32 / 7.0]
                     }
                 };
-                if std::env::var("SSX3_VR_TERRAIN_SOURCE").is_ok_and(|v| v == "1") {
+                if gpu::terrain_source_enabled() {
                     strips.strip_with_params(&verts, params);
                 } else {
                     strips.strip(&verts);

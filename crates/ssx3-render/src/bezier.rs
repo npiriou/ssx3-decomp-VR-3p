@@ -609,6 +609,15 @@ pub mod gpu {
     use super::*;
     use crate::gpu::{GpuCall, Link, Program, UNIFORM_QWORDS};
 
+    /// The VR executable sets this before the first VU call. Terrain strips
+    /// are hot enough that querying the process environment for every strip
+    /// costs more than the optional source parameters themselves.
+    pub fn terrain_source_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED
+            .get_or_init(|| std::env::var("SSX3_VR_TERRAIN_SOURCE").is_ok_and(|value| value == "1"))
+    }
+
     /// Uniform qwords of a call.
     pub mod uni {
         /// M (columns).

@@ -181,6 +181,8 @@ pub struct Inner {
     /// Frames timed and the time (ms) in build, prepare, encode+submit,
     /// depth readback.
     timing: (u64, [f64; 4]),
+    /// `Build::run` calls; a VR scene has two eye passes and one HUD pass.
+    built_scenes: u64,
     /// The depth readback's parts (ms): waiting for the previous frame's GPU
     /// work, copying the depth out, creating the next buffer.
     depth_parts: [f64; 3],
@@ -393,6 +395,7 @@ impl Renderer {
                 frames_in: 0,
                 zscale: 16777216.0,
                 timing: (0, [0.0; 4]),
+                built_scenes: 0,
                 depth_parts: [0.0; 3],
                 pass_counts: [0; 6],
                 present: Vec::new(),
@@ -1328,20 +1331,22 @@ impl Inner {
     /// Start the stage timings over (a benchmark's window).
     pub fn reset_timing(&mut self) {
         self.timing = (0, [0.0; 4]);
+        self.built_scenes = 0;
         self.depth_parts = [0.0; 3];
         self.pass_counts = [0; 6];
     }
 
-    /// Mean time per frame in each stage of `render` (ms).
+    /// Build time per game scene, draw time per eye/HUD pass (ms).
     pub fn timing_report(&self) -> String {
         let n = self.timing.0.max(1) as f64;
+        let scenes = self.built_scenes.max(1) as f64;
         let t = &self.timing.1;
         format!(
-            "gfx per frame: build {:.2} ms, prepare {:.2} ms, encode+submit {:.2} ms, depth readback {:.2} ms (GPU wait {:.2}, copy {:.2}, buffer {:.2}) ({} frames)",
-            t[0] / n, t[1] / n, t[2] / n, t[3] / n,
+            "gfx: build {:.2} ms/scene ({} scenes), prepare {:.2} ms/pass, encode+submit {:.2} ms/pass, depth readback {:.2} ms/pass (GPU wait {:.2}, copy {:.2}, buffer {:.2}) ({} passes)",
+            t[0] / scenes, self.built_scenes, t[1] / n, t[2] / n, t[3] / n,
             self.depth_parts[0] / n, self.depth_parts[1] / n, self.depth_parts[2] / n, self.timing.0
         ) + &format!(
-            "; per frame: {:.1} passes, {:.1} colour snapshots, {:.1} depth snapshots, {:.1} target switches, {:.0} draws, {:.0}% of the frame copied to snapshots",
+            "; per draw pass: {:.1} render passes, {:.1} colour snapshots, {:.1} depth snapshots, {:.1} target switches, {:.0} draws, {:.0}% of the frame copied to snapshots",
             self.pass_counts[0] as f64 / n, self.pass_counts[1] as f64 / n,
             self.pass_counts[2] as f64 / n, self.pass_counts[3] as f64 / n,
             self.pass_counts[4] as f64 / n, self.pass_counts[5] as f64 / n
@@ -1471,6 +1476,7 @@ impl Inner {
         let eyes = *self.shared.vr_eyes.lock().unwrap();
         Build::run(&mut b, built, mem, eyes);
         self.put_build(b);
+        self.built_scenes += 1;
         self.timing.1[0] += t_start.elapsed().as_secs_f64() * 1e3;
         // This classification depends only on the published batch list.
         // Reusing it avoids scanning the whole world for each eye and HUD.

@@ -682,6 +682,28 @@ ARA1 live runs through frame 1006 both measured 59.6 fresh stereo images/s
 over frames 420–1006; the renderer-only gain does not establish a live FPS
 gain or close G3. `SSX3_VR_REUSE_BINDINGS=0` is the comparison switch.
 
+### Terrain VU configuration on the hot path (2026-10-31)
+
+Profiling a muted Gravitude race showed that one VU chunk contains about
+250–410 sequential `mat1` Bézier calls. It consumed roughly 5–9 ms and
+accounted for most of the render worker's wait. Each terrain strip queried
+the Windows process environment to decide whether to retain its original
+patch coordinates. The VR executable sets that option before starting the
+game. `mat1` and `mat2` now read it once per process through their shared
+Bézier GPU helper, then use the cached value for every strip.
+
+On the same frozen Gravitude frame 650 at 1920 square per eye with GPU waits,
+steady stereo render time fell from 19.02 to 14.59 ms; left, right, UI and
+main PNG files were byte-identical. In a later live 180° Gravitude run,
+frames 420–651 reached 59.8 game ticks/s and 59.6 fresh stereo images/s,
+with 1.1 ms total render-queue publication wait. A preceding run before
+the fix measured 58.0 ticks/s, 57.3 fresh images/s and 440.2 ms publication
+wait on the same interval. Snow Jam frames 420–1006 reached 59.9 ticks/s,
+59.6 fresh images/s and 2.6 ms publication wait; its rear eyes remained
+fully covered and distinct. Short offline windows and machine variation
+still do not prove sustained headset pacing. Renderer timing logs now
+separate game-scene build time from each eye/HUD draw-pass time.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase
