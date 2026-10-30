@@ -364,7 +364,15 @@ fn draw(
         for (packet, count, off) in [(PACKET_A, s.a, 0), (PACKET_B, s.b, s.b_offset)] {
             strips.packet(packet);
             for strip in grid_strips(g.n, count, pos.wrapping_add(off), uv.wrapping_add(off)) {
-                strips.strip(&strip);
+                if std::env::var("SSX3_VR_TERRAIN_SOURCE").is_ok_and(|v| v == "1") {
+                    strips.strip_with_params(&strip, |addr| {
+                        let index = addr.wrapping_sub(pos) as f32;
+                        let n = g.n as f32;
+                        [(index / n).floor() / (n - 1.0), (index % n) / (n - 1.0)]
+                    });
+                } else {
+                    strips.strip(&strip);
+                }
             }
         }
         let colour = m.ld(COLOUR);

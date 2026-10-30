@@ -523,7 +523,27 @@ fn draw(m: &mut Mem, pos: u16, uv: u16, kick: &mut dyn FnMut(&[u128]), gpu: Gpu)
                         uv: uv.wrapping_add(o),
                     })
                     .collect();
-                strips.strip(&verts);
+                let params = |addr: u16| {
+                    let offset = addr.wrapping_sub(pos);
+                    let (row, col) = (offset / 8, offset % 8);
+                    let l = lods.0;
+                    if row == 0 && col < l[X] {
+                        [0.0, col as f32 / (l[X] - 1) as f32]
+                    } else if row == 7 && col < l[Y] {
+                        [1.0, col as f32 / (l[Y] - 1) as f32]
+                    } else if col == 0 && row < l[Z] {
+                        [row as f32 / (l[Z] - 1) as f32, 0.0]
+                    } else if col == 7 && row < l[W] {
+                        [row as f32 / (l[W] - 1) as f32, 1.0]
+                    } else {
+                        [row as f32 / 7.0, col as f32 / 7.0]
+                    }
+                };
+                if std::env::var("SSX3_VR_TERRAIN_SOURCE").is_ok_and(|v| v == "1") {
+                    strips.strip_with_params(&verts, params);
+                } else {
+                    strips.strip(&verts);
+                }
             }
         }
         gpu::draw(m, &strips, colour, 0, 2, out);

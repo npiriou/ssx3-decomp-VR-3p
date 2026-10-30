@@ -238,7 +238,28 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   results and remain just under the 60 fresh-images/s headset gate.
   The standard 6000-frame race replay RAM gate matches its baseline with
   terrain-source copying both off and on.
-  The captured coefficients are not yet used to change the visible mesh.
+  The default renderer does not yet use the captured coefficients to change
+  the visible mesh.
+- An **opt-in** renderer mesh trial now uses those coefficients and the
+  native strip vertices' patch coordinates. It measures each original
+  triangle against both VR eyes, subdivides visible triangles above a
+  projected error threshold, and shares the refined source vertices between
+  the terrain's texture passes. Midpoints bordering coarse triangles or
+  neighbouring patches stay on the original straight edge, so a change in
+  refinement level does not open a geometric gap. The guest's 4/6/8 grid is
+  unchanged. On the Gravitude frame-1000 side-view replay, a 256-triangle
+  budget kept both 1920-square eyes filled and distinct, but raised the
+  repeated frozen render from 24.27 to 25.69 ms (frame build 3.18 vs
+  3.07 ms). A 1200-triangle trial took 28.06 ms. The visual improvement on
+  that frame is modest. A muted live Gravitude run through frame 651 with
+  the 256-triangle option measured only 54.2 game ticks/s and 54.0 fresh
+  stereo images/s over race frames 420–651, versus 59.9 ticks/s and 59.9
+  fresh images/s in the adjacent default-path run. With refinement disabled,
+  the new per-vertex patch metadata produced byte-identical 512-square left
+  and right images against the source-capture-off control. This CPU path
+  therefore remains disabled by default. The next work is to target the
+  highest-error close surfaces and move refinement off the frame's CPU path
+  before repeating the headset gate.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it

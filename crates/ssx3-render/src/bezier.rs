@@ -643,6 +643,9 @@ pub mod gpu {
     #[derive(Default)]
     pub struct Strips {
         pub verts: Vec<Vertex>,
+        /// Fixed-point (u,v) on the source bicubic, one per vertex. Zero
+        /// means unavailable; the packed value is renderer metadata only.
+        params: Vec<u32>,
         /// (packet slot, first strip, strips end) into `lens`.
         packets: Vec<(u16, usize, usize)>,
         lens: Vec<u32>,
@@ -655,6 +658,13 @@ pub mod gpu {
         }
         pub fn strip(&mut self, s: &[Vertex]) {
             self.verts.extend_from_slice(s);
+            self.params.extend(std::iter::repeat_n(0, s.len()));
+            self.lens.push(s.len() as u32);
+            self.packets.last_mut().expect("packet first").2 += 1;
+        }
+        pub fn strip_with_params(&mut self, s: &[Vertex], f: impl Fn(u16) -> [f32; 2]) {
+            self.verts.extend_from_slice(s);
+            self.params.extend(s.iter().map(|v| pack_param(f(v.pos))));
             self.lens.push(s.len() as u32);
             self.packets.last_mut().expect("packet first").2 += 1;
         }
@@ -697,6 +707,22 @@ pub mod gpu {
 
     fn tag(v: V) -> u128 {
         v[0] as u128 | (v[1] as u128) << 32 | (v[2] as u128) << 64 | (v[3] as u128) << 96
+    }
+
+    /// A pair of 15-bit normalized patch parameters with a nonzero marker.
+    fn pack_param([u, v]: [f32; 2]) -> u32 {
+        let fix = |x: f32| (x.clamp(0.0, 1.0) * 32767.0).round() as u32;
+        0x8000_0000 | (fix(u) << 15) | fix(v)
+    }
+
+    /// Recover a native terrain vertex's location on its source bicubic.
+    pub fn unpack_param(bits: u32) -> Option<[f32; 2]> {
+        (bits & 0x8000_0000 != 0).then(|| {
+            [
+                ((bits >> 15) & 0x7fff) as f32 / 32767.0,
+                (bits & 0x7fff) as f32 / 32767.0,
+            ]
+        })
     }
 
     /// Whether a fan tag draws the clipped triangles as such: a triangle
@@ -750,11 +776,15 @@ pub mod gpu {
         let nv = s.verts.len() as u32;
         // (Smooth normals only for the renderer's lighting: without it a
         // zero third qword, the layout unchanged.)
-        let mut data = Some(if crate::world_casters::enabled() {
+        let mut data = if crate::world_casters::enabled() {
             with_normals(s, &data)
         } else {
             without_normals(s, &data)
-        });
+        };
+        for (v, &param) in s.params.iter().enumerate() {
+            data[DATA_STRIDE * v + 2][3] = param;
+        }
+        let mut data = Some(data);
         let alpha_max = colour[3] as i32 as f32;
         let fan = m.ld(FAN_TAG_A);
         let mut call =

@@ -28,6 +28,7 @@ mod options;
 pub mod pack;
 mod post;
 mod shadow;
+mod terrain_vr;
 pub mod tex;
 pub mod vr;
 
@@ -1175,14 +1176,13 @@ impl Inner {
         self.world_casters = built.casters.clone();
         self.painter_sun = built.sun;
         self.frame_gm = built.frame.gm;
-        let vr_active = self.shared.vr_eyes.lock().unwrap().is_some();
-        Build::run(&mut b, built, mem, vr_active);
+        let eyes = *self.shared.vr_eyes.lock().unwrap();
+        Build::run(&mut b, built, mem, eyes);
         self.put_build(b);
         self.timing.1[0] += t_start.elapsed().as_secs_f64() * 1e3;
         // Build once, then draw the same triangles from each tracked eye.
         // Taking the list here also leaves GS ready for the next game frame.
         let batches = std::mem::take(&mut self.gs.batches);
-        let eyes = *self.shared.vr_eyes.lock().unwrap();
         // The last perspective record is the active scene projection. The
         // first one may use a shorter near plane for sky/background draws.
         let source = built
@@ -3295,7 +3295,8 @@ struct Build {
 }
 
 impl Build {
-    fn run(b: &mut Build, built: &Built, mem: &(dyn Mem + Sync), vr_active: bool) {
+    fn run(b: &mut Build, built: &Built, mem: &(dyn Mem + Sync), eyes: Option<[vr::Eye; 2]>) {
+        let vr_active = eyes.is_some();
         let fr = &built.frame;
         let d = &fr.display;
         let (w, h) = (d.fb_width.clamp(64, 2048), d.fb_height.clamp(64, 2048));
@@ -3486,6 +3487,32 @@ impl Build {
                     .rposition(|(owner, _)| matches!(owner, Owner::Payload(0)))
             })
             .flatten();
+        let refine_terrain =
+            vr_active && std::env::var("SSX3_VR_TERRAIN_MESH").is_ok_and(|v| v == "1");
+        let terrain_reprojections: Vec<Option<[[[f32; 4]; 4]; 2]>> = if refine_terrain {
+            built
+                .frame
+                .matrices
+                .iter()
+                .map(|m| {
+                    eyes.and_then(|eyes| {
+                        Some([
+                            vr::reproject(eyes[0], m.view_proj)?,
+                            vr::reproject(eyes[1], m.view_proj)?,
+                        ])
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut terrain_mesh = None;
+        let mut terrain_stats = terrain_vr::Stats::default();
+        let mut terrain_remaining = std::env::var("SSX3_VR_TERRAIN_BUDGET")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(256)
+            .min(1200);
         std::thread::scope(|sc| {
             // The helper workers (the browser) take every chunk up front;
             // without threads, this thread does.
@@ -3558,16 +3585,46 @@ impl Build {
                     }
                 }
                 match ev {
-                    Event::Call(_) => {
+                    Event::Call(vu_call) => {
                         b.stats.vu_calls += 1;
                         match vu.take(&plan, i) {
                             Some(CallOut::Gif(out)) => {
                                 b.stats.vu_native += 1;
                                 b.gs.gif(&out);
                             }
-                            Some(CallOut::Gpu(g)) => {
+                            Some(CallOut::Gpu(mut g)) => {
                                 b.stats.vu_native += 1;
                                 b.stats.vu_gpu += 1;
+                                if refine_terrain {
+                                    let coeffs = vu_call
+                                        .terrain_patch
+                                        .and_then(|p| built.terrain_coeffs.get(&p));
+                                    let xy = b.gs.ctx[0].xyoffset;
+                                    let offset = [
+                                        (xy & 0xffff) as f32 / 16.0,
+                                        ((xy >> 32) & 0xffff) as f32 / 16.0,
+                                    ];
+                                    let projected = n
+                                        .and_then(|n| draws.get(n))
+                                        .and_then(|d| terrain_reprojections.get(d.matrix as usize))
+                                        .copied()
+                                        .flatten()
+                                        .map(|matrices| {
+                                            matrices.map(|reproject| terrain_vr::EyeProject {
+                                                reproject,
+                                                game_size: b.gs.size,
+                                                offset,
+                                            })
+                                        });
+                                    terrain_vr::refine_calls(
+                                        &mut g,
+                                        coeffs,
+                                        projected.as_ref(),
+                                        &mut terrain_mesh,
+                                        &mut terrain_remaining,
+                                        &mut terrain_stats,
+                                    );
+                                }
                                 for c in g {
                                     if vr_sky_dome && matches!(owner, Owner::Payload(0)) {
                                         sky_dome_calls.push(c.clone());
@@ -3760,6 +3817,13 @@ impl Build {
             }
             vu.finish(&plan, &mut b.vu);
         });
+        if refine_terrain && std::env::var_os("SSX3_VR_TERRAIN_STATS").is_some() {
+            eprintln!("[vr-terrain-mesh] {} patches, {} refined triangles, {} visible sources, {} rejected sources, {} candidates, {} measured, {:.2} max error, {} triangle budget remaining, {} projected matrices",
+                terrain_stats.patches, terrain_stats.triangles, terrain_stats.visible_sources,
+                terrain_stats.rejected, terrain_stats.candidates, terrain_stats.measured,
+                terrain_stats.max_error, terrain_remaining,
+                terrain_reprojections.iter().filter(|m| m.is_some()).count());
+        }
         // Whatever is left runs before the next frame.
         label(&mut b.gs, "path3".into());
         while let Some(pk) = p3.pop_front() {
