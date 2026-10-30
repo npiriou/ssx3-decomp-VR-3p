@@ -8,6 +8,7 @@ use ssx3_render::bezier::gpu::{self as bz, unpack_param};
 use ssx3_render::gpu::{GpuCall, Link};
 
 type Q = [u32; 4];
+type Coeffs = [[f32; 4]; 16];
 
 #[derive(Clone, Copy)]
 struct Blend {
@@ -48,6 +49,14 @@ pub struct Stats {
     pub visible_sources: usize,
     /// Measured triangle counts at >= 1, 2, 5, 10, 20, 40 nominal eye pixels.
     pub error_bins: [usize; 6],
+    pub timed: bool,
+    pub choose_ns: u128,
+    pub midpoint_ns: u128,
+    pub split_ns: u128,
+    pub visible_ns: u128,
+    pub valid_ns: u128,
+    pub error_ns: u128,
+    pub join_ns: u128,
 }
 
 #[derive(Clone, Copy)]
@@ -55,6 +64,34 @@ pub struct EyeProject {
     pub reproject: [[f32; 4]; 4],
     pub game_size: (u32, u32),
     pub offset: [f32; 2],
+}
+
+#[derive(Clone, Copy)]
+struct ScreenProject {
+    matrix: [[f32; 4]; 4],
+}
+
+impl ScreenProject {
+    fn new(call: &GpuCall, eye: EyeProject) -> Self {
+        let gs = f(call.uniforms[4]);
+        let go = f(call.uniforms[5]);
+        let (sx, sy) = (eye.game_size.0 as f32, eye.game_size.1 as f32);
+        let game_clip = [
+            [gs[0] * 2.0 / sx, 0.0, 0.0, 0.0],
+            [0.0, -gs[1] * 2.0 / sy, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [
+                (go[0] - eye.offset[0] + 0.5) * 2.0 / sx - 1.0,
+                1.0 - (go[1] - eye.offset[1] + 0.5) * 2.0 / sy,
+                0.0,
+                1.0,
+            ],
+        ];
+        let source = std::array::from_fn(|i| f(call.uniforms[i]));
+        Self {
+            matrix: crate::vr::mul(eye.reproject, crate::vr::mul(game_clip, source)),
+        }
+    }
 }
 
 fn f(q: Q) -> [f32; 4] {
@@ -65,13 +102,17 @@ fn bits(q: [f32; 4]) -> Q {
     q.map(f32::to_bits)
 }
 
-fn eval(c: &[[u32; 4]; 16], [u, v]: [f32; 2]) -> [f32; 4] {
+fn decode(c: &[[u32; 4]; 16]) -> Coeffs {
+    c.map(f)
+}
+
+fn eval(c: &Coeffs, [u, v]: [f32; 2]) -> [f32; 4] {
     let up = [u * u * u, u * u, u, 1.0];
     let vp = [v * v * v, v * v, v, 1.0];
     let mut out = [0.0; 4];
     for j in 0..4 {
         for i in 0..4 {
-            let q = f(c[4 * j + i]);
+            let q = c[4 * j + i];
             for lane in 0..4 {
                 out[lane] += q[lane] * up[i] * vp[j];
             }
@@ -88,28 +129,8 @@ fn params(data: &[Q], v: usize) -> Option<[f32; 2]> {
     unpack_param(data[3 * v + 2][3])
 }
 
-fn screen(call: &GpuCall, p: [f32; 4], eye: EyeProject) -> Option<[f32; 2]> {
-    let mut h = [0.0; 4];
-    for (col, &value) in p.iter().enumerate() {
-        let m = f(call.uniforms[col]);
-        for lane in 0..4 {
-            h[lane] += m[lane] * value;
-        }
-    }
-    if !h.iter().all(|v| v.is_finite()) {
-        return None;
-    }
-    let gs = f(call.uniforms[4]);
-    let go = f(call.uniforms[5]);
-    let w = h[3];
-    let (sx, sy) = (eye.game_size.0 as f32, eye.game_size.1 as f32);
-    let clip = [
-        (gs[0] * h[0] + (go[0] - eye.offset[0] + 0.5) * w) * 2.0 / sx - w,
-        w - (gs[1] * h[1] + (go[1] - eye.offset[1] + 0.5) * w) * 2.0 / sy,
-        h[2],
-        w,
-    ];
-    let h = crate::vr::transform(eye.reproject, clip);
+fn screen(project: ScreenProject, p: [f32; 4]) -> Option<[f32; 2]> {
+    let h = crate::vr::transform(project.matrix, p);
     if h[3] <= 0.1
         || h[0].abs() > 1.25 * h[3]
         || h[1].abs() > 1.25 * h[3]
@@ -133,12 +154,11 @@ fn shared_border(a: [f32; 2], b: [f32; 2]) -> bool {
 /// Error in a nominal 1024-pixel eye between a coarse triangle edge and the
 /// exact cubic midpoint. Reject vertices that do not map to this patch.
 fn edge_error(
-    call: &GpuCall,
     data: &[Q],
-    c: &[[u32; 4]; 16],
+    c: &Coeffs,
     a: usize,
     b: usize,
-    eyes: &[EyeProject; 2],
+    projects: &[ScreenProject; 2],
 ) -> Option<f32> {
     let (pa, pb) = (params(data, a)?, params(data, b)?);
     let (va, vb) = (point(data, a), point(data, b));
@@ -152,17 +172,21 @@ fn edge_error(
     // 1) is retained even though the coefficient's unused W polynomial is
     // not constant.
     midpoint[3] = linear[3];
-    eyes.iter()
-        .filter_map(|&eye| {
-            let x = screen(call, linear, eye)?;
-            let y = screen(call, midpoint, eye)?;
+    if midpoint == linear {
+        return Some(0.0);
+    }
+    projects
+        .iter()
+        .filter_map(|&project| {
+            let x = screen(project, linear)?;
+            let y = screen(project, midpoint)?;
             let d = (x[0] - y[0]).hypot(x[1] - y[1]);
             d.is_finite().then_some(d)
         })
         .reduce(f32::max)
 }
 
-fn valid_vertex(data: &[Q], c: &[[u32; 4]; 16], v: usize) -> bool {
+fn valid_vertex(data: &[Q], c: &Coeffs, v: usize) -> bool {
     let Some(uv) = params(data, v) else {
         return false;
     };
@@ -184,7 +208,7 @@ fn edge_key(data: &[Q], a: usize, b: usize) -> (u32, u32) {
 
 fn midpoint_position(
     data: &[Q],
-    coeffs: &[[u32; 4]; 16],
+    coeffs: &Coeffs,
     a: usize,
     b: usize,
     curved: &HashSet<(u32, u32)>,
@@ -198,12 +222,7 @@ fn midpoint_position(
     bits(p)
 }
 
-fn refined_vertex(
-    data: &[Q],
-    c: &[[u32; 4]; 16],
-    blend: Blend,
-    curved: &HashSet<(u32, u32)>,
-) -> [Q; 3] {
+fn refined_vertex(data: &[Q], c: &Coeffs, blend: Blend, curved: &HashSet<(u32, u32)>) -> [Q; 3] {
     let mut p = [0.0; 4];
     let mut uv = [0.0; 4];
     let mut n = [0.0; 4];
@@ -265,14 +284,29 @@ impl Mesh {
             stats.rejected += 1;
             return None;
         }
-        if !(0..nv).any(|v| {
-            eyes.iter()
-                .any(|&eye| screen(source, point(&source.data, v), eye).is_some())
-        }) {
+        let start = stats.timed.then(std::time::Instant::now);
+        let projects = eyes.map(|eye| ScreenProject::new(source, eye));
+        let visible = (0..nv).any(|v| {
+            projects
+                .iter()
+                .any(|&project| screen(project, point(&source.data, v)).is_some())
+        });
+        if let Some(start) = start {
+            stats.visible_ns += start.elapsed().as_nanos();
+        }
+        if !visible {
             return None;
         }
         stats.visible_sources += 1;
-        let valid: Vec<_> = (0..nv).map(|v| valid_vertex(&source.data, c, v)).collect();
+        let start = stats.timed.then(std::time::Instant::now);
+        let decoded = decode(c);
+        let valid: Vec<_> = (0..nv)
+            .map(|v| valid_vertex(&source.data, &decoded, v))
+            .collect();
+        if let Some(start) = start {
+            stats.valid_ns += start.elapsed().as_nanos();
+        }
+        let start = stats.timed.then(std::time::Instant::now);
         let mut selected = Vec::new();
         let mut seen = HashSet::new();
         let mut patch_triangles = 0;
@@ -294,7 +328,7 @@ impl Mesh {
                         (verts[1], verts[2]),
                         (verts[2], verts[0]),
                     ] {
-                        if let Some(e) = edge_error(source, &source.data, c, a, b, eyes) {
+                        if let Some(e) = edge_error(&source.data, &decoded, a, b, &projects) {
                             measured = true;
                             error = error.max(e);
                         }
@@ -325,9 +359,13 @@ impl Mesh {
                 selected.push((i, verts));
             }
         }
+        if let Some(start) = start {
+            stats.error_ns += start.elapsed().as_nanos();
+        }
         if selected.is_empty() {
             return None;
         }
+        let start = stats.timed.then(std::time::Instant::now);
         // The strips duplicate grid vertices. Canonical parameter pairs
         // identify a shared edge even across two distinct strip records.
         // Curved midpoints are allowed only when both adjacent triangles
@@ -344,6 +382,9 @@ impl Mesh {
             .into_iter()
             .filter_map(|(key, n)| (n == 2).then_some(key))
             .collect();
+        if let Some(start) = start {
+            stats.join_ns += start.elapsed().as_nanos();
+        }
         stats.patches += 1;
         Some(Choice {
             source_vertices: nv,
@@ -360,6 +401,7 @@ impl Mesh {
         stats: &mut Stats,
     ) -> Option<(Self, Vec<Q>)> {
         let choice = Self::choose(calls, c, eyes, 0.7, remaining, stats)?;
+        let decoded = decode(c);
         let source = calls.first()?;
         let mut data = source.data.clone();
         let mut appended = Vec::new();
@@ -379,7 +421,12 @@ impl Mesh {
                         vertices: verts,
                         weights,
                     };
-                    data.extend_from_slice(&refined_vertex(&source.data, c, blend, &choice.curved));
+                    data.extend_from_slice(&refined_vertex(
+                        &source.data,
+                        &decoded,
+                        blend,
+                        &choice.curved,
+                    ));
                     appended.push(blend);
                 }
                 ids.push((data.len() / 3 - 1) as u32);
@@ -485,16 +532,26 @@ impl GpuMesh {
         remaining: &mut usize,
         stats: &mut Stats,
     ) -> Option<(Self, Vec<Q>)> {
-        let choice = Mesh::choose(calls, coeffs, eyes, threshold, remaining, stats)?;
+        let start = stats.timed.then(std::time::Instant::now);
+        let choice = Mesh::choose(calls, coeffs, eyes, threshold, remaining, stats);
+        if let Some(start) = start {
+            stats.choose_ns += start.elapsed().as_nanos();
+        }
+        let choice = choice?;
+        let start = stats.timed.then(std::time::Instant::now);
+        let decoded = decode(coeffs);
         let data = &calls.first()?.data;
         let mut selected = HashMap::with_capacity(choice.selected.len());
         let mut midpoints = Vec::with_capacity(3 * choice.selected.len());
         for (i, [a, b, c]) in choice.selected {
             let id = (midpoints.len() / 3 + 1) as u32;
             for (x, y) in [(a, b), (b, c), (c, a)] {
-                midpoints.push(midpoint_position(data, coeffs, x, y, &choice.curved));
+                midpoints.push(midpoint_position(data, &decoded, x, y, &choice.curved));
             }
             selected.insert(i, id);
+        }
+        if let Some(start) = start {
+            stats.midpoint_ns += start.elapsed().as_nanos();
         }
         Some((
             Self {
@@ -575,6 +632,7 @@ fn gpu_group(
     let Some(mesh) = cache.as_ref() else {
         return group;
     };
+    let start = stats.timed.then(std::time::Instant::now);
     let mut out = Vec::with_capacity(group.len() * 2);
     for mut call in group {
         let refined = if matches!(call.link, Link::Source(bz::KEY) | Link::Reuse(bz::KEY))
@@ -588,6 +646,9 @@ fn gpu_group(
         if let Some(refined) = refined {
             out.push(refined);
         }
+    }
+    if let Some(start) = start {
+        stats.split_ns += start.elapsed().as_nanos();
     }
     out
 }
@@ -652,14 +713,15 @@ mod tests {
         let mut coeffs = [[0; 4]; 16];
         // x(u,v) = u²; the original straight edge has x=0.5 at u=0.5.
         coeffs[13][0] = 1f32.to_bits();
+        let decoded = decode(&coeffs);
         let blend = Blend {
             vertices: [0, 1, 2],
             weights: [0.5, 0.5, 0.0],
         };
-        let linear = refined_vertex(&data, &coeffs, blend, &HashSet::new());
+        let linear = refined_vertex(&data, &decoded, blend, &HashSet::new());
         let curved = refined_vertex(
             &data,
-            &coeffs,
+            &decoded,
             blend,
             &HashSet::from([edge_key(&data, 0, 1)]),
         );

@@ -272,9 +272,29 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   renderer recorded 7.7 colour snapshots and copies covering 770% of an eye
   frame per draw. An adjacent run with the mesh off measured 59.9 game ticks/s
   and 59.9 fresh stereo images/s, with 7.2 colour snapshots and 715% copied.
-  This path stays off by default; reducing the repeated eye
-  rendering and snapshot cost is the next performance investigation. These
-  measurements are offline, with no new headset validation.
+  This path stays off by default. These measurements are offline, with no
+  new headset validation.
+- The colour-copy trace identified repeated destination-alpha (DATE) tests
+  on small world draws as the main source of full-eye snapshots. The VR
+  renderer now projects CPU triangle vertices and conservative type-3 strip
+  boxes into each eye, then copies only their affected region. It retains
+  the original DATE tests. Disabling DATE changed 14–17% of pixels on two
+  forward course captures, so dropping those tests is not a valid shortcut.
+  With eye-space bounds enabled, 12 stereo course images across ARA1, DRA4
+  and ERA5 at 0° and +90° matched the unbounded control pixel-for-pixel.
+  In adjacent muted Gravitude runs at 1920-square eyes, copied area fell from
+  715% to 279% of a rendered frame per draw and the average colour
+  snapshots from 7.2 to 5.0. Fresh stereo rates were 59.7 and 60.0/s over
+  frames 420–650; this small timing difference is within run variation.
+- The mesh selector now composes the eye projection once per patch. Frozen
+  forward and side stereo captures with GPU refinement remained pixel-identical.
+  On one repeated Gravitude side frame, selecting about 114 of 2510 candidate
+  triangles still took roughly 0.8 ms; midpoint generation took 0.02 ms and
+  call splitting 0.11 ms. A live refinement run with snapshot bounds reached
+  58.9 fresh stereo images/s over frames 420–651. A later adjacent run on
+  a busier machine fell to 51.7/s while the default path also fell to
+  58.2/s. Refinement remains opt-in. Neither 60 fresh images/s with terrain
+  refinement nor the headset pacing gate is established.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it

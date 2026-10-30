@@ -66,6 +66,9 @@ its GPU work. It excludes OpenXR swapchain and headset compositor time.
 | `SSX3_VR_TERRAIN_BUDGET=256` | Maximum refined source triangles per frame for the experimental mesh, capped at 1200. |
 | `SSX3_VR_TERRAIN_ERROR=10` | Minimum projected error in nominal eye pixels for the experimental `gpu` mode; the `cpu` mode keeps its 0.7-pixel threshold. |
 | `SSX3_VR_TERRAIN_STATS=1` | Log the experimental mesh's visible sources, selected triangles, projection errors and remaining budget. |
+| `SSX3_VR_TERRAIN_TIMING=all\|<frame>` | Measure the experimental mesh's selection, midpoint and call-splitting time during a replay. |
+| `SSX3_VR_SNAPSHOT_BOUNDS=0` | Disable VR-only eye-space bounds for destination-alpha snapshot copies, for image and timing comparisons (enabled by default). |
+| `SSX3_GFX_SNAPSHOT_TRACE=all\|<frame>` | Log each colour snapshot's eye, source draw, affected region and copied dimensions. |
 
 The current VR path is under redesign; `docs/plans/vr-redesign.md` tracks the remaining coverage and frame-rate gates. Mute game tests with `SSX3_AUDIO=0`.
 

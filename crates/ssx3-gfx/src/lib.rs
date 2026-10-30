@@ -710,6 +710,87 @@ impl ssx3_ps2::frame_sink::FrameSink for Renderer {
     }
 }
 
+/// Conservative eye-space bounds for a CPU triangle list. When every vertex
+/// has positive eye W, each triangle's projected interior lies inside its
+/// projected vertex bounds; otherwise the caller keeps the full scissor.
+fn vr_cpu_bounds(
+    vertices: &[gs::Vtx],
+    matrix: [[f32; 4]; 4],
+    game_size: (u32, u32),
+) -> Option<[f32; 4]> {
+    let (w, h) = (game_size.0 as f32, game_size.1 as f32);
+    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for vertex in vertices {
+        let p = vertex.pos;
+        let game_clip = [
+            2.0 * (p[0] + 0.5) / w - 1.0,
+            1.0 - 2.0 * (p[1] + 0.5) / h,
+            1.0 - 2.0 * p[2],
+            1.0,
+        ];
+        let eye = vr::transform(matrix, game_clip);
+        if !(eye[3] > 0.0) || !eye.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let x = (eye[0] / eye[3] + 1.0) * w * 0.5 - 0.5;
+        let y = (1.0 - eye[1] / eye[3]) * h * 0.5 - 0.5;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        bounds = [
+            bounds[0].min(x),
+            bounds[1].min(y),
+            bounds[2].max(x),
+            bounds[3].max(y),
+        ];
+    }
+    (bounds[0] <= bounds[2]).then_some(bounds)
+}
+
+/// Project a strip's conservative game-screen box. The shader's 1/16-pixel
+/// snapping and float rounding fit inside the one-pixel source margin.
+fn vr_box_bounds(
+    source: [f32; 6],
+    matrix: [[f32; 4]; 4],
+    game_size: (u32, u32),
+) -> Option<[f32; 4]> {
+    if source[0] > source[2]
+        || source[1] > source[3]
+        || source[4] > source[5]
+        || !source.iter().all(|v| v.is_finite())
+    {
+        return None;
+    }
+    let (w, h) = (game_size.0 as f32, game_size.1 as f32);
+    let xs = [source[0] - 1.0, source[2] + 1.0];
+    let ys = [source[1] - 1.0, source[3] + 1.0];
+    let zs = [source[4] - 1e-4, source[5] + 1e-4];
+    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for x in xs {
+        for y in ys {
+            for z in zs {
+                let game_clip = [2.0 * (x + 0.5) / w - 1.0, 1.0 - 2.0 * (y + 0.5) / h, z, 1.0];
+                let eye = vr::transform(matrix, game_clip);
+                if !(eye[3] > 0.0) || !eye.iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                let px = (eye[0] / eye[3] + 1.0) * w * 0.5 - 0.5;
+                let py = (1.0 - eye[1] / eye[3]) * h * 0.5 - 0.5;
+                if !px.is_finite() || !py.is_finite() {
+                    return None;
+                }
+                bounds = [
+                    bounds[0].min(px),
+                    bounds[1].min(py),
+                    bounds[2].max(px),
+                    bounds[3].max(py),
+                ];
+            }
+        }
+    }
+    Some(bounds)
+}
+
 impl Inner {
     fn ensure_targets(&mut self, w: u32, h: u32) {
         if self.targets.as_ref().is_some_and(|t| t.w == w && t.h == h) {
@@ -1682,6 +1763,10 @@ impl Inner {
         // Debug: SSX3_GFX_SKIPTEST=hex,... drops batches with that TEST.
         // A trailing `c`/`a`: only colour-writing / only alpha-only batches.
         let dbg = debug::get();
+        let snapshot_trace = std::env::var("SSX3_GFX_SNAPSHOT_TRACE")
+            .ok()
+            .is_some_and(|v| v == "all" || v.parse::<u64>().ok() == Some(self.stats.frames));
+        let vr_snapshot_bounds = std::env::var("SSX3_VR_SNAPSHOT_BOUNDS").as_deref() != Ok("0");
         let skip_test = &dbg.skip_test;
         // Debug: SSX3_GFX_PROBE=x,y prints that main-target pixel after every
         // item that changes it (on the SSX3_GFX_TRACE frame, if set).
@@ -1887,6 +1972,16 @@ impl Inner {
                 && !b.tag.hud
                 && !b.tag.screen
                 && b.tag.post.is_none();
+            let reprojection = if vr_world {
+                self.vr_eye.map(|(eye, fallback)| {
+                    self.vr_reprojections[eye]
+                        .get(b.tag.matrix as usize)
+                        .and_then(|m| *m)
+                        .unwrap_or(fallback)
+                })
+            } else {
+                None
+            };
             let scissor = (x0 <= x1 && y0 <= y1 && x0 < tw && y0 < th).then(|| {
                 if vr_world {
                     return [0, 0, pw, ph];
@@ -1905,7 +2000,21 @@ impl Inner {
             // (Vertex bounds in target pixels, a pixel's margin: the GPU
             // samples at pixel centres.)
             let bounds = if vr_world {
-                None
+                if vr_snapshot_bounds && (st.ctx.test >> 14) & 1 != 0 {
+                    match (b.gpu, reprojection) {
+                        (None, Some(matrix)) => vr_cpu_bounds(
+                            &self.gs.verts[b.first as usize..(b.first + b.count) as usize],
+                            matrix,
+                            (w, h),
+                        ),
+                        (Some(g), Some(matrix)) => g
+                            .vr_box
+                            .and_then(|source| vr_box_bounds(source, matrix, (w, h))),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
             } else {
                 match b.gpu {
                     Some(g) => g.bounds,
@@ -2096,16 +2205,6 @@ impl Inner {
                         std::mem::size_of_val(&words),
                     )
                 });
-                let reprojection = if vr_world {
-                    self.vr_eye.map(|(eye, fallback)| {
-                        self.vr_reprojections[eye]
-                            .get(b.tag.matrix as usize)
-                            .and_then(|m| *m)
-                            .unwrap_or(fallback)
-                    })
-                } else {
-                    None
-                };
                 let matrix = reprojection.unwrap_or(vr::IDENTITY);
                 for column in matrix {
                     for value in column {
@@ -2638,6 +2737,15 @@ impl Inner {
                     (x0, y0, x1, y1) = (x0.max(a[0]), y0.max(a[1]), x1.min(a[2]), y1.min(a[3]));
                 }
                 let (x1, y1) = (x1.min(t.w), y1.min(t.h));
+                if snapshot_trace && snapshot {
+                    eprintln!(
+                        "[snapshot] tick={} eye={:?} ui={} batch={} gpu={:?} terrain={} pass2={} hud={} post={:?} frame={} date={} changed={:?} area={:?} copy={}x{}",
+                        self.stats.frames, self.vr_eye.map(|(eye, _)| eye), self.vr_ui, it.batch,
+                        it.gpu.map(|g| g.program), it.tag.terrain, it.tag.pass2,
+                        it.tag.hud, it.tag.post, it.frame, it.date, changed, it.area,
+                        x1.saturating_sub(x0), y1.saturating_sub(y0)
+                    );
+                }
                 if snapshot && x0 < x1 && y0 < y1 {
                     // Snapshot the frame as drawn so far (what changed).
                     let origin = wgpu::Origin3d { x: x0, y: y0, z: 0 };
@@ -3513,6 +3621,9 @@ impl Build {
         let mut terrain_mesh = None;
         let mut terrain_gpu_mesh = None;
         let mut terrain_stats = terrain_vr::Stats::default();
+        terrain_stats.timed = std::env::var("SSX3_VR_TERRAIN_TIMING")
+            .ok()
+            .is_some_and(|v| v == "all" || v.parse::<u64>().ok() == Some(b.frame));
         let mut terrain_remaining = std::env::var("SSX3_VR_TERRAIN_BUDGET")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -3848,6 +3959,21 @@ impl Build {
             eprintln!(
                 "[vr-terrain-mesh:{terrain_mode}] triangle errors >=1/2/5/10/20/40 px: {:?}",
                 terrain_stats.error_bins
+            );
+        }
+        if terrain_stats.timed {
+            eprintln!(
+                "[vr-terrain-timing] frame {} choose {:.3}ms (visible {:.3}, valid {:.3}, errors {:.3}, join {:.3}) midpoints {:.3}ms split {:.3}ms selected {} candidates {}",
+                b.frame,
+                terrain_stats.choose_ns as f64 / 1e6,
+                terrain_stats.visible_ns as f64 / 1e6,
+                terrain_stats.valid_ns as f64 / 1e6,
+                terrain_stats.error_ns as f64 / 1e6,
+                terrain_stats.join_ns as f64 / 1e6,
+                terrain_stats.midpoint_ns as f64 / 1e6,
+                terrain_stats.split_ns as f64 / 1e6,
+                terrain_stats.triangles,
+                terrain_stats.candidates
             );
         }
         // Whatever is left runs before the next frame.

@@ -148,6 +148,9 @@ pub struct GpuBatch {
     /// Target pixels (x0, y0, x1, y1) that hold all its vertices, when
     /// known on the CPU (type 3 strips: [`strip_bounds`]).
     pub bounds: Option<[f32; 4]>,
+    /// Type 3 strip's screen x/y and clip z/w extrema for conservative
+    /// reprojection into a tracked VR eye.
+    pub vr_box: Option<[f32; 6]>,
 }
 
 /// The screen bounds of a type 3 strip call (`gpuvu/mat3_strip.wgsl`):
@@ -160,14 +163,17 @@ fn strip_bounds(
     off: [f32; 2],
     squeeze: f32,
     cx: f32,
-) -> Option<[f32; 4]> {
+) -> Option<[f32; 6]> {
     use ssx3_render::mat3::gpu_strip;
+    if call.data.len() < gpu_strip::VERTEX_QWORDS {
+        return None;
+    }
     let fl = |q: [u32; 4]| q.map(f32::from_bits);
     let (gs, go) = (
         fl(call.uniforms[gpu_strip::GUARD_SCALE]),
         fl(call.uniforms[gpu_strip::GUARD_OFFSET]),
     );
-    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MAX, f32::MIN];
     for v in call.data.chunks_exact(gpu_strip::VERTEX_QWORDS) {
         let c = fl(v[2]);
         if !(c[3] > 0.0) {
@@ -175,12 +181,20 @@ fn strip_bounds(
         }
         let x = squeeze * (go[0] + gs[0] * c[0] / c[3] - off[0]) + cx * (1.0 - squeeze);
         let y = go[1] + gs[1] * c[1] / c[3] - off[1];
-        if !x.is_finite() || !y.is_finite() {
+        let z = c[2] / c[3];
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
             return None;
         }
-        b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        b = [
+            b[0].min(x),
+            b[1].min(y),
+            b[2].max(x),
+            b[3].max(y),
+            b[4].min(z),
+            b[5].max(z),
+        ];
     }
-    Some(b)
+    (b[0] <= b[2] && b[1] <= b[3] && b[4] <= b[5]).then_some(b)
 }
 
 /// The GPU-computed draws of a frame: per-call uniforms, vertex inputs and
@@ -1173,25 +1187,27 @@ impl Gs {
         ];
         // (The terrain's pass 2 draws with the ctx2 tags: PRIM.CTXT.)
         let pass2 = call.program == ssx3_render::gpu::Program::Bezier && (st.prim >> 9) & 1 != 0;
+        let vr_box = (call.program == ssx3_render::gpu::Program::Mat3Strip)
+            .then(|| {
+                strip_bounds(
+                    &call,
+                    [
+                        bits(xy, 0, 16) as f32 / 16.0,
+                        bits(xy, 32, 16) as f32 / 16.0,
+                    ],
+                    squeeze,
+                    cx,
+                )
+            })
+            .flatten();
         let gb = GpuBatch {
             program: call.program,
             call: self.gpu.call_start.first().copied().unwrap_or(0),
             first: self.gpu.verts,
             count: call.draw_len() as u32,
             alpha_max: call.alpha_max,
-            bounds: (call.program == ssx3_render::gpu::Program::Mat3Strip)
-                .then(|| {
-                    strip_bounds(
-                        &call,
-                        [
-                            bits(xy, 0, 16) as f32 / 16.0,
-                            bits(xy, 32, 16) as f32 / 16.0,
-                        ],
-                        squeeze,
-                        cx,
-                    )
-                })
-                .flatten(),
+            bounds: vr_box.map(|b| [b[0], b[1], b[2], b[3]]),
+            vr_box,
         };
         use ssx3_render::gpu::GS_PARAMS;
         let n = u[..GS_PARAMS]
