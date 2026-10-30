@@ -671,6 +671,17 @@ also failed to improve throughput and was removed. The next G3 work needs
 to reduce repeated eye draw planning, binding and submission while keeping
 ordered GS resource updates and the two independently projected views.
 
+The second eye now reuses the first eye's texture views and bind groups
+while the target textures and uniform buffer are the same. A buffer growth
+rebuilds the groups. On frozen 1024-square Gravitude frame 650 and Snow Jam
+frame 1000, left, right, and UI PNGs were byte-identical with reuse on and
+off. Four alternating 1920-square, GPU-waited Gravitude replays measured
+18.65 and 18.83 ms per stereo frame without reuse versus 17.88 and 17.29 ms
+with reuse. One Snow Jam pair measured 21.07 versus 19.51 ms. Adjacent muted
+ARA1 live runs through frame 1006 both measured 59.6 fresh stereo images/s
+over frames 420–1006; the renderer-only gain does not establish a live FPS
+gain or close G3. `SSX3_VR_REUSE_BINDINGS=0` is the comparison switch.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

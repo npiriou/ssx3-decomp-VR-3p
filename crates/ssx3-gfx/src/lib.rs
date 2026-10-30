@@ -205,6 +205,7 @@ pub struct Inner {
     /// Vertex and uniform buffers, kept across frames (grown as needed).
     vbuf: Option<wgpu::Buffer>,
     ubuf: Option<wgpu::Buffer>,
+    eye_bind_cache: Option<EyeBindCache>,
     /// GPU-computed draws: call uniforms, inputs, indices.
     gbuf: [Option<wgpu::Buffer>; 4],
     /// The mesh arena on the GPU (`gs::MeshArena`) and the arena epoch it
@@ -238,6 +239,15 @@ struct DrawFrameInputs {
     flare_light: Option<(f32, f32, u32)>,
     /// Silhouette targets are classified once for all eye and HUD draws.
     silhouette_rts: std::collections::HashSet<u32>,
+}
+
+type TextureBindKey = (Option<u32>, u64, draw::SampKey, bool);
+
+/// The first eye's texture bindings are valid for the second eye: both use
+/// the same target textures, uniform buffer and immutable game textures.
+struct EyeBindCache {
+    ubuf_size: u64,
+    entries: HashMap<TextureBindKey, (Option<wgpu::TextureView>, u8, wgpu::BindGroup)>,
 }
 
 /// What the render thread shares with the game and the window without
@@ -400,6 +410,7 @@ impl Renderer {
                 arena_buf: None,
                 arena_epoch: u64::MAX,
                 ubuf: None,
+                eye_bind_cache: None,
             })),
             shared,
         )
@@ -1629,6 +1640,14 @@ impl Inner {
         view_only: bool,
     ) {
         let t_built = web_time::Instant::now();
+        let eye_bind_cache = if self.vr_eye.is_some_and(|(eye, _)| eye == 1)
+            && std::env::var("SSX3_VR_REUSE_BINDINGS").as_deref() != Ok("0")
+        {
+            self.eye_bind_cache.take()
+        } else {
+            self.eye_bind_cache = None;
+            None
+        };
         let scene = &geometry.state;
         self.timing.0 += 1;
         let (w, h) = scene.size;
@@ -1988,7 +2007,8 @@ impl Inner {
         let mut ubytes: Vec<u8> = Vec::new();
         let mut binds: Vec<(Option<wgpu::TextureView>, draw::SampKey)> = Vec::new();
         let mut bind_amax: Vec<u8> = Vec::new();
-        let mut bind_ix: HashMap<(Option<u32>, u64, draw::SampKey, bool), usize> = HashMap::new();
+        let mut bind_ix: HashMap<TextureBindKey, usize> = HashMap::new();
+        let mut cached_groups: Vec<Option<wgpu::BindGroup>> = Vec::new();
         // Debug: SSX3_GFX_SKIPTEST=hex,... drops batches with that TEST.
         // A trailing `c`/`a`: only colour-writing / only alpha-only batches.
         let dbg = debug::get();
@@ -2130,40 +2150,49 @@ impl Inner {
             let bind = match bind_ix.get(&bkey) {
                 Some(&i) => i,
                 None => {
+                    let cached = eye_bind_cache
+                        .as_ref()
+                        .and_then(|cache| cache.entries.get(&bkey));
                     // (Frame and render-target alpha is stored up to 0x80.)
-                    let (view, amax) = match st.tex {
-                        Some(gs::FRAME_TEX) => {
-                            let t = self.targets.as_ref().expect("targets");
-                            (Some(t.snapshot.create_view(&Default::default())), 128)
-                        }
-                        Some(t) if t & gs::RT_TEX != 0 => (
-                            self.rts
-                                .get(&(t & !gs::RT_TEX))
-                                .map(|r| r.color.create_view(&Default::default())),
-                            128,
-                        ),
-                        Some(t) if t & gs::ZFOG_TEX != 0 => {
-                            (self.clut_texture(scene, t & !gs::ZFOG_TEX), 255)
-                        }
-                        Some(info) => {
-                            if dbg.texlog == Some(self.stats.frames) {
-                                let k = tex::key(mem, info, st.texa);
-                                eprintln!("[gfx-tex] info {info:#x} name {} format {:#x} pixels {:#x} tex0 {:#x} hash {:#x}", pack::name(&k), k.format, k.pixels, k.tex0, k.hash);
+                    let (view, amax, cached_group) = if let Some((view, amax, group)) = cached {
+                        (view.clone(), *amax, Some(group.clone()))
+                    } else {
+                        let (view, amax) = match st.tex {
+                            Some(gs::FRAME_TEX) => {
+                                let t = self.targets.as_ref().expect("targets");
+                                (Some(t.snapshot.create_view(&Default::default())), 128)
                             }
-                            let t = if bake_tint {
-                                self.bake_texture(info, st.texa, sk, mem)
-                            } else {
-                                self.texture(info, st.texa, mem)
-                            };
-                            match t {
-                                Some((v, a)) => (Some(v), a),
-                                None => (None, 128),
+                            Some(t) if t & gs::RT_TEX != 0 => (
+                                self.rts
+                                    .get(&(t & !gs::RT_TEX))
+                                    .map(|r| r.color.create_view(&Default::default())),
+                                128,
+                            ),
+                            Some(t) if t & gs::ZFOG_TEX != 0 => {
+                                (self.clut_texture(scene, t & !gs::ZFOG_TEX), 255)
                             }
-                        }
-                        None => (None, 0),
+                            Some(info) => {
+                                if dbg.texlog == Some(self.stats.frames) {
+                                    let k = tex::key(mem, info, st.texa);
+                                    eprintln!("[gfx-tex] info {info:#x} name {} format {:#x} pixels {:#x} tex0 {:#x} hash {:#x}", pack::name(&k), k.format, k.pixels, k.tex0, k.hash);
+                                }
+                                let t = if bake_tint {
+                                    self.bake_texture(info, st.texa, sk, mem)
+                                } else {
+                                    self.texture(info, st.texa, mem)
+                                };
+                                match t {
+                                    Some((v, a)) => (Some(v), a),
+                                    None => (None, 128),
+                                }
+                            }
+                            None => (None, 0),
+                        };
+                        (view, amax, None)
                     };
                     bind_amax.push(amax);
                     binds.push((view, sk));
+                    cached_groups.push(cached_group);
                     bind_ix.insert(bkey, binds.len() - 1);
                     binds.len() - 1
                 }
@@ -2509,9 +2538,18 @@ impl Inner {
             .expect("targets")
             .zsnap
             .create_view(&Default::default());
+        let reuse_groups = eye_bind_cache
+            .as_ref()
+            .is_some_and(|cache| cache.ubuf_size == ubuf.size());
         let groups: Vec<wgpu::BindGroup> = binds
             .iter()
-            .map(|(view, sk)| {
+            .enumerate()
+            .map(|(index, (view, sk))| {
+                if reuse_groups {
+                    if let Some(group) = &cached_groups[index] {
+                        return group.clone();
+                    }
+                }
                 let aniso = self.aniso;
                 let samp = self
                     .samplers
@@ -2552,6 +2590,24 @@ impl Inner {
                 })
             })
             .collect();
+        if self.vr_eye.is_some_and(|(eye, _)| eye == 0) {
+            self.eye_bind_cache = Some(EyeBindCache {
+                ubuf_size: ubuf.size(),
+                entries: bind_ix
+                    .iter()
+                    .map(|(&key, &index)| {
+                        (
+                            key,
+                            (
+                                binds[index].0.clone(),
+                                bind_amax[index],
+                                groups[index].clone(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            });
+        }
         for it in &items {
             match it.gpu {
                 Some(g) => {

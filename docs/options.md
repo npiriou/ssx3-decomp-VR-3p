@@ -72,6 +72,7 @@ its GPU work. It excludes OpenXR swapchain and headset compositor time.
 | `SSX3_VR_TERRAIN_TIMING=all\|<frame>` | Measure the experimental mesh's selection, midpoint and call-splitting time during a replay. |
 | `SSX3_VR_TERRAIN_GEOMETRY_CACHE=0` | Disable reuse of exact native patch curve samples across game frames in the experimental `gpu` mode (enabled by default). |
 | `SSX3_VR_SNAPSHOT_BOUNDS=0` | Disable VR-only eye-space bounds for destination-alpha snapshot copies, for image and timing comparisons (enabled by default). |
+| `SSX3_VR_REUSE_BINDINGS=0` | Recreate the texture bind groups for the right eye instead of reusing the left eye's groups, for image and timing comparisons (reuse enabled by default). |
 | `SSX3_GFX_SNAPSHOT_TRACE=all\|<frame>` | Log each colour snapshot's eye, source draw, affected region and copied dimensions. |
 
 The current VR path is under redesign; `docs/plans/vr-redesign.md` tracks the remaining coverage and frame-rate gates. Mute game tests with `SSX3_AUDIO=0`.
