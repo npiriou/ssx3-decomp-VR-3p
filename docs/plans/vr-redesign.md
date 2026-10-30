@@ -172,6 +172,22 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   ```powershell
   python tools/upscale-textures.py --dump textures/dump --out textures/vr-replace --esrgan textures/.tools/realesrgan/realesrgan-ncnn-vulkan.exe --model realesrgan-x4plus --edge clamp --alpha linear --jobs 1 2e1883ea3e3234e9 3a6f7b87a7fff1fa 495b17680be14ec7 961cbc35f32993aa a38a73d21917a5f5 b4befe89e8aaa8c5 bbbbb9e865d7dc34 bbf9cab272b33e27 bc3014b1fd28cc91
   ```
+- A separate frozen Gravitude frame-1000 experiment replaced 17 opaque
+  128×128 snow/rock tiles with 512×512 restorations. The side-view eyes
+  remained fully filled and distinct, but the change averaged only 0.15
+  RGB levels per channel across the image and did not improve the large
+  faceted wall. This tile set is **not** in the local VR pack. VIF call
+  counts on that frame show 261 Bezier1 patches using the 4×4 grid,
+  75 using 6×6 and only three using 8×8. The close-wall problem needs a
+  terrain geometry/LOD design, not a blanket texture upscaling pass.
+  The game-side LOD table returns 4, 6 or 8 points per patch edge. An
+  experimental VR minimum of 6 changed only 50,396 of 3,686,400 pixels
+  in the frame-1000 side view, leaving the wall's silhouette unchanged.
+  Forcing 8 opened obvious gaps and dropped the renderer's average draw
+  count from 872 to 353; its faster frame time was caused by missing
+  terrain. Both LOD overrides were removed. A future VR terrain path must
+  tessellate from the patch's source data on the renderer side and match
+  shared edge samples, while leaving the game's LOD output intact.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it
@@ -386,6 +402,16 @@ only if it reuses native assets, animations, materials, and event order and
 passes the same coverage and parity gates. Two visual traversal passes from
 one simulation tick are a fallback to evaluate, not an assumption that the
 original render traversal has no side effects.
+
+For close Bézier terrain, keep the game's 4/6/8 edge decisions and guest
+buffers unchanged. Capture each patch's original control points or
+power-basis coefficients before its fixed grid is emitted, then evaluate
+an immutable VR mesh at a screen-error-driven density. Neighbouring patches
+must use identical samples along shared edges; the terrain's two texture
+passes, normals, shadows and draw order must still refer to the same mesh.
+Use the native grid when source data is unavailable. Compare frozen
+forward/side stereo images for holes and silhouette changes before timing
+the live pipeline. The direct game-side LOD override failed this gate.
 
 ### 3. Give the HUD its own spatial contract
 
