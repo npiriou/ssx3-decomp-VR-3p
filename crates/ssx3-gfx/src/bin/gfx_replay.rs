@@ -36,6 +36,12 @@ fn main() {
     }
     let ctx = ssx3_ps2::gpu::context().expect("GPU");
     let r = ssx3_gfx::Renderer::new(ctx.device.clone(), ctx.queue.clone());
+    if std::env::var_os("SSX3_VR_REPLAY_NO_BLOOM").is_some() {
+        r.set_options(ssx3_gfx::Options {
+            bloom: ssx3_gfx::Bloom::Off,
+            ..Default::default()
+        });
+    }
     let frames: Vec<_> = dumps
         .iter()
         .map(|path| {
@@ -70,10 +76,16 @@ fn main() {
             "right" => (3.2, 0.0),
             "stereo" => (0.0, 0.0),
             "look-right" => (0.0, 25.0f32),
+            "look-left" => (0.0, -90.0f32),
             "look-side" => (0.0, 90.0f32),
+            "look-side-stereo" => (0.0, 90.0f32),
             "look-back" => (0.0, 180.0f32),
-            _ => panic!("SSX3_VR_REPLAY_EYE: left, right, look-right, look-side or look-back"),
+            _ => panic!("SSX3_VR_REPLAY_EYE: left, right, stereo, look-right, look-left, look-side, look-side-stereo or look-back"),
         };
+        let offset = std::env::var("SSX3_VR_REPLAY_OFFSET")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(offset);
         let a = yaw_degrees.to_radians();
         let (s, c) = a.sin_cos();
         let mut view = ssx3_gfx::vr::IDENTITY;
@@ -84,7 +96,7 @@ fn main() {
             view_from_game: view,
             projection: ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0),
         };
-        let eyes = if spec == "stereo" {
+        let eyes = if spec == "stereo" || spec == "look-side-stereo" {
             std::array::from_fn(|i| {
                 let mut e = eye;
                 e.view_from_game[3][0] = if i == 0 { 3.2 } else { -3.2 };
@@ -94,7 +106,9 @@ fn main() {
             [eye; 2]
         };
         r.set_vr_eyes(Some(eyes));
-        r.set_output_size(Some((1024, 1024)));
+        if std::env::var_os("SSX3_RENDER_SIZE").is_none() {
+            r.set_output_size(Some((1024, 1024)));
+        }
     }
     if std::env::var_os("SSX3_REPLAY_DEPTH").is_some() {
         r.set_want_depth(true);
@@ -132,6 +146,20 @@ fn main() {
                         .or_insert(0usize) += 1;
                 }
                 eprintln!("[vr-matrix] draw matrix/material counts: {by:?}");
+                for (n, d) in built.frame.draws().enumerate() {
+                    if d.matrix == 0 {
+                        let mut calls = Vec::new();
+                        for (owner, ev) in &built.events {
+                            if matches!(owner, ssx3_render::frame::Owner::Payload(i) if *i == n) {
+                                if let ssx3_render::vif::Event::Call(c) = ev {
+                                    calls.push((c.entry, c.native, c.input.len()));
+                                }
+                            }
+                        }
+                        eprintln!("[vr-matrix] sky draw {n}: {:?} layer {} matrix {} header {} state_change {} calls {:?}",
+                            d.state.material, d.state.layer, d.matrix, d.header_matrix, d.state_change, calls);
+                    }
+                }
             }
             // SSX3_VIF_STATS: decoded (not replayed) VU input qwords per
             // material and calls.
@@ -274,12 +302,33 @@ fn main() {
             }
             // Over the memory the game hands a renderer (the frame's
             // texture pages), as live; `SSX3_FULL_SNAPSHOT=1`: all of it.
-            if std::env::var("SSX3_FULL_SNAPSHOT").is_ok_and(|v| v == "1") {
+            let retain_for_refresh = std::env::var_os("SSX3_VR_REPLAY_REFRESH").is_some()
+                && vr_replay.is_some()
+                && i + 1 == frames.len()
+                && rep + 1 == repeat;
+            if retain_for_refresh {
+                // Exercise the same owned frame path as the live renderer:
+                // the saved memory pages must survive a view-only refresh.
+                drop(g);
+                let mut ranges = Vec::new();
+                ssx3_render::frame::texture_ranges(mem, &built.frame, &mut ranges);
+                let published = frame_sink::Published {
+                    gm: built.frame.gm,
+                    built,
+                    carry: carry.clone(),
+                    mem: frame_sink::FrameMem::from_ram(&mem.ram, &ranges),
+                };
+                let mut sink = r.clone();
+                ssx3_ps2::frame_sink::FrameSink::frame(&mut sink, published);
+            } else if std::env::var("SSX3_FULL_SNAPSHOT").is_ok_and(|v| v == "1") {
                 g.render(&built, mem);
             } else {
                 let mut ranges = Vec::new();
                 ssx3_render::frame::texture_ranges(mem, &built.frame, &mut ranges);
                 g.render(&built, &frame_sink::FrameMem::from_ram(&mem.ram, &ranges));
+            }
+            if std::env::var_os("SSX3_VR_REPLAY_GPU_WAIT").is_some() {
+                let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
             }
             if rep > 0 {
                 times.push((
@@ -299,6 +348,43 @@ fn main() {
         );
         eprintln!("{}", r.0.lock().unwrap().timing_report());
     }
+    if let Ok(spec) = std::env::var("SSX3_VR_REPLAY_REFRESH") {
+        let yaw = match spec.as_str() {
+            "look-side" => 90.0f32,
+            "look-side-stereo" => 90.0f32,
+            "look-left" => -90.0f32,
+            "look-back" => 180.0f32,
+            _ => panic!(
+                "SSX3_VR_REPLAY_REFRESH: look-side, look-side-stereo, look-left or look-back"
+            ),
+        };
+        let (s, c) = yaw.to_radians().sin_cos();
+        let mut view = ssx3_gfx::vr::IDENTITY;
+        view[0] = [c, 0.0, s, 0.0];
+        view[2] = [-s, 0.0, c, 0.0];
+        let eye = ssx3_gfx::vr::Eye {
+            view_from_game: view,
+            projection: ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0),
+        };
+        let eyes = if spec == "look-side-stereo" {
+            std::array::from_fn(|i| {
+                let mut e = eye;
+                e.view_from_game[3][0] = if i == 0 { 3.2 } else { -3.2 };
+                e
+            })
+        } else {
+            [eye; 2]
+        };
+        let refresh_start = std::time::Instant::now();
+        assert!(r.refresh_vr_eyes(eyes), "no retained perspective scene");
+        if std::env::var_os("SSX3_VR_REPLAY_GPU_WAIT").is_some() {
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        eprintln!(
+            "[vr-refresh] view-only stereo render {:.2} ms",
+            refresh_start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     if std::env::var_os("SSX3_GPU_STATS").is_some() {
         let s = r.stats();
         eprintln!("[gpu-stats] native draws {}, VU calls {} ({} without a program), batches {}, frames {}", s.native_draws, s.vu_calls, s.vu_missing, s.batches, s.frames);
@@ -313,31 +399,60 @@ fn main() {
         );
     }
     let dumps = &dumps[..];
-    if vr_replay.as_deref() == Some("stereo") {
-        let [left, right] = r.read_stereo_images().expect("two VR eyes");
-        assert_eq!((left.0, left.1), (right.0, right.1));
-        let differing = left.2.iter().zip(&right.2).filter(|(a, b)| a != b).count();
-        eprintln!(
-            "[vr-stereo] {differing}/{} pixels differ between the two rendered eyes",
-            left.2.len()
-        );
-        assert!(
-            differing > left.2.len() / 100,
-            "eyes are effectively identical"
-        );
-        let path = std::path::Path::new(out);
-        let stem = path.file_stem().unwrap().to_string_lossy();
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        for (suffix, (w, h, px)) in [("left", left), ("right", right)] {
-            let img: Vec<u32> = px.iter().map(|p| p | 0xFF00_0000).collect();
+    if matches!(vr_replay.as_deref(), Some("stereo" | "look-side-stereo")) {
+        if let Some([left, right]) = r.read_stereo_images() {
+            assert_eq!((left.0, left.1), (right.0, right.1));
+            for (name, eye) in [("left", &left), ("right", &right)] {
+                let lit = eye.2.iter().filter(|&&px| px & 0x00ff_ffff != 0).count();
+                eprintln!("[vr-stereo] {name} nonblack: {lit}/{}", eye.2.len());
+                assert!(lit > eye.2.len() / 100, "{name} eye is blank");
+            }
+            let differing = left.2.iter().zip(&right.2).filter(|(a, b)| a != b).count();
+            eprintln!(
+                "[vr-stereo] {differing}/{} pixels differ between the two rendered eyes",
+                left.2.len()
+            );
+            if std::env::var("SSX3_VR_REPLAY_REFRESH").as_deref() != Ok("look-side") {
+                assert!(
+                    differing > left.2.len() / 100,
+                    "eyes are effectively identical"
+                );
+            }
+            let path = std::path::Path::new(out);
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            for (suffix, (w, h, px)) in [("left", left), ("right", right)] {
+                let img: Vec<u32> = px.iter().map(|p| p | 0xFF00_0000).collect();
+                std::fs::write(
+                    parent.join(format!("{stem}-{suffix}.png")),
+                    png::encode(w, h, &img),
+                )
+                .unwrap();
+            }
+        } else {
+            eprintln!("[vr-stereo] no perspective view; inspecting spatial menu texture");
+        }
+    }
+    if vr_replay.is_some() {
+        if let Some((w, h, px)) = r.read_vr_ui_image() {
+            let path = std::path::Path::new(out);
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
             std::fs::write(
-                parent.join(format!("{stem}-{suffix}.png")),
-                png::encode(w, h, &img),
+                parent.join(format!("{stem}-ui.png")),
+                png::encode(w, h, &px),
             )
             .unwrap();
         }
     }
-    let (w, h, px) = r.read_image().expect("image");
+    let (w, h, px) = if vr_replay.is_some() {
+        r.read_stereo_images()
+            .map(|eyes| eyes.into_iter().next().unwrap())
+            .or_else(|| r.read_vr_ui_image())
+            .expect("VR world or menu image")
+    } else {
+        r.read_image().expect("image")
+    };
     let img: Vec<u32> = px.iter().map(|p| p | 0xFF00_0000).collect();
     std::fs::write(out, png::encode(w, h, &img)).unwrap();
     // SSX3_DUMP_RTS=DIR: the render targets too, as DIR/rt<fbp>.png (RGB)

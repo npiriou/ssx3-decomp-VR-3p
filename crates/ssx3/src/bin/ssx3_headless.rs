@@ -64,8 +64,43 @@ fn main() {
     if std::env::var_os("SSX3_AUDIO").is_none() {
         std::env::set_var("SSX3_AUDIO", "0");
     }
+    // Exercise the live game and full-resolution stereo renderer together
+    // without an OpenXR headset. This measures the producer side of the VR
+    // pipeline, including its frame-sink backpressure, rather than a frozen
+    // renderer replay. The value is a fixed headset yaw in degrees.
+    let vr_offline_yaw = std::env::var("SSX3_VR_OFFLINE_STEREO")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|yaw| yaw.is_finite());
+    if let Some(yaw) = vr_offline_yaw {
+        std::env::set_var("SSX3_VR_VISIBILITY", "1");
+        std::env::set_var("SSX3_VR_TEST_YAW", yaw.to_string());
+    }
     let mut c = game::boot(true);
     let gfx = game::install_renderer(&mut c);
+    if let (Some(yaw), Some(g)) = (vr_offline_yaw, gfx.as_ref()) {
+        let size = std::env::var("SSX3_VR_EYE_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&size| (512..=3840).contains(&size))
+            .unwrap_or(1920);
+        let (s, co) = yaw.to_radians().sin_cos();
+        let mut view = ssx3_gfx::vr::IDENTITY;
+        view[0] = [co, 0.0, s, 0.0];
+        view[2] = [-s, 0.0, co, 0.0];
+        let projection = ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
+        let eyes = std::array::from_fn(|i| {
+            let mut eye_view = view;
+            eye_view[3][0] = if i == 0 { 3.2 } else { -3.2 };
+            ssx3_gfx::vr::Eye {
+                view_from_game: eye_view,
+                projection,
+            }
+        });
+        g.set_output_size(Some((size, size)));
+        g.set_vr_eyes(Some(eyes));
+        eprintln!("[vr offline] fixed yaw {yaw} degrees, {size}x{size} per eye");
+    }
     // Check of the browser's VU offload path: every chunk of VU1 calls
     // encoded, run from the bytes and decoded (`ssx3_render::vujob`).
     if std::env::var_os("SSX3_VU_OFFLOAD_SELFTEST").is_some() {

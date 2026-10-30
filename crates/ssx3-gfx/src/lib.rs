@@ -102,6 +102,8 @@ pub struct Inner {
     queue: wgpu::Queue,
     pipes: draw::Pipelines,
     targets: Option<Targets>,
+    /// HUD and menu target, independent of the per-eye world resolution.
+    ui_targets: Option<Targets>,
     rts: HashMap<u32, RtTarget>,
     gs: gs::Gs,
     vu: Box<[u8; 16384]>,
@@ -189,8 +191,18 @@ pub struct Inner {
     pass_counts: [u64; 6],
     /// The image on screen, for presenting (sRGB view allowed).
     present: Vec<wgpu::Texture>,
+    /// Transparent HUD image shared by the two VR eyes.
+    ui_present: Option<wgpu::Texture>,
     /// Eye currently drawn, and game-clip to eye-clip transform.
     vr_eye: Option<(usize, [[f32; 4]; 4])>,
+    vr_reprojections: [Vec<Option<[[f32; 4]; 4]>>; 2],
+    vr_ui: bool,
+    vr_menu: bool,
+    /// Last fully built VR scene. The worker owns its memory snapshot until
+    /// the next game frame, allowing a new tracked view without replaying
+    /// stateful VIF/GS commands.
+    vr_last_published: Option<Job>,
+    vr_last_batches: Option<Vec<gs::Batch>>,
     /// Vertex and uniform buffers, kept across frames (grown as needed).
     vbuf: Option<wgpu::Buffer>,
     ubuf: Option<wgpu::Buffer>,
@@ -225,6 +237,7 @@ pub struct Shared {
     /// The latest frame's images (in-between ones first) and when they
     /// were ready.
     present: Mutex<Option<(Vec<wgpu::Texture>, web_time::Instant)>>,
+    ui_present: Mutex<Option<wgpu::Texture>>,
     vr_eyes: Mutex<Option<[vr::Eye; 2]>>,
 }
 
@@ -301,6 +314,7 @@ impl Renderer {
                 queue,
                 pipes,
                 targets: None,
+                ui_targets: None,
                 rts: HashMap::new(),
                 gs: gs::Gs::new(),
                 vu: Box::new([0; 16384]),
@@ -340,7 +354,13 @@ impl Renderer {
                 depth_parts: [0.0; 3],
                 pass_counts: [0; 6],
                 present: Vec::new(),
+                ui_present: None,
                 vr_eye: None,
+                vr_reprojections: std::array::from_fn(|_| Vec::new()),
+                vr_ui: false,
+                vr_menu: false,
+                vr_last_published: None,
+                vr_last_batches: None,
                 staged: None,
                 vbuf: None,
                 gbuf: [None, None, None, None],
@@ -363,11 +383,7 @@ impl Renderer {
             .name("ssx3-gfx".into())
             .spawn(move || {
                 while let Ok(f) = rx.recv() {
-                    inner
-                        .lock()
-                        .unwrap()
-                        .render_built(&f.built, &f.carry, &f.mem);
-                    drop(f);
+                    inner.lock().unwrap().render_published(f);
                     let mut p = shared.pending.lock().unwrap();
                     *p -= 1;
                     shared.idle.notify_all();
@@ -422,6 +438,23 @@ impl Renderer {
         }))
     }
 
+    /// The game's HUD, rendered on transparent pixels for a spatial VR card.
+    pub fn present_vr_ui_view(&self) -> Option<wgpu::TextureView> {
+        let g = self.1.ui_present.lock().unwrap();
+        Some(g.as_ref()?.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            ..Default::default()
+        }))
+    }
+
+    /// Read the independent HUD image during offline VR inspection.
+    pub fn read_vr_ui_image(&self) -> Option<(u32, u32, Vec<u32>)> {
+        self.flush();
+        let g = self.0.lock().unwrap();
+        let t = g.ui_present.as_ref()?;
+        Some(g.read_texture(t, t.width(), t.height()))
+    }
+
     /// Read both eye images for offline stereo inspection.
     pub fn read_stereo_images(&self) -> Option<[(u32, u32, Vec<u32>); 2]> {
         self.flush();
@@ -438,6 +471,19 @@ impl Renderer {
     /// Supply tracked eye cameras in the moving game's chase-camera space.
     pub fn set_vr_eyes(&self, eyes: Option<[vr::Eye; 2]>) {
         *self.1.vr_eyes.lock().unwrap() = eyes;
+    }
+
+    /// Render fresh tracked eyes from the latest prepared game scene. This
+    /// does not advance the game or replay its stateful VIF/GS stream. It is
+    /// useful when OpenXR presents between two 60 Hz game ticks.
+    pub fn refresh_vr_eyes(&self, eyes: [vr::Eye; 2]) -> bool {
+        self.flush();
+        let mut g = self.0.lock().unwrap();
+        if !g.refresh_vr_eyes(eyes) {
+            return false;
+        }
+        *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
+        true
     }
 
     /// The modern graphics options.
@@ -538,7 +584,7 @@ impl ssx3_ps2::frame_sink::FrameSink for Renderer {
                     g.publish_staged(f);
                 } else {
                     g.finish_staged();
-                    g.render_built(&f.built, &f.carry, &f.mem);
+                    g.render_published(f);
                 }
             }
         }
@@ -961,7 +1007,7 @@ impl Inner {
     pub fn finish_staged(&mut self) {
         let Some(s) = self.staged.take() else { return };
         *PREFETCH.lock().unwrap() = s.collect;
-        self.render_built(&s.f.built, &s.f.carry, &s.f.mem);
+        self.render_published(s.f);
         // Not taken (the plan came out different): still wait, the helpers
         // must be idle before the next jobs.
         if let Some((_, c)) = PREFETCH.lock().unwrap().take() {
@@ -984,13 +1030,21 @@ impl Inner {
         self.render(built, mem);
     }
 
+    /// Consume a published frame, retaining its texture-page snapshot only
+    /// when it has a perspective VR scene that can be viewed again.
+    fn render_published(&mut self, f: Job) {
+        self.render_built(&f.built, &f.carry, &f.mem);
+        if self.vr_last_batches.is_some() {
+            self.vr_last_published = Some(f);
+        }
+    }
+
     /// Render a frame.
     pub fn render(&mut self, built: &Built, mem: &(dyn Mem + Sync)) {
         self.render_one(built, mem);
-        if !self.present.is_empty() {
-            *self.shared.present.lock().unwrap() =
-                Some((self.present.clone(), web_time::Instant::now()));
-        }
+        *self.shared.present.lock().unwrap() =
+            (!self.present.is_empty()).then(|| (self.present.clone(), web_time::Instant::now()));
+        *self.shared.ui_present.lock().unwrap() = self.ui_present.clone();
     }
 
     /// The build state, moved out of the renderer (see `Build`).
@@ -1018,14 +1072,20 @@ impl Inner {
 
     fn render_one(&mut self, built: &Built, mem: &(dyn Mem + Sync)) {
         self.stats.frames += 1;
+        self.vr_last_published = None;
+        self.vr_last_batches = None;
         let t_start = web_time::Instant::now();
         let mut b = self.take_build();
         self.world_casters = built.casters.clone();
         self.painter_sun = built.sun;
         self.frame_gm = built.frame.gm;
-        Build::run(&mut b, built, mem);
+        let vr_active = self.shared.vr_eyes.lock().unwrap().is_some();
+        Build::run(&mut b, built, mem, vr_active);
         self.put_build(b);
         self.timing.1[0] += t_start.elapsed().as_secs_f64() * 1e3;
+        // Build once, then draw the same triangles from each tracked eye.
+        // Taking the list here also leaves GS ready for the next game frame.
+        let batches = std::mem::take(&mut self.gs.batches);
         let eyes = *self.shared.vr_eyes.lock().unwrap();
         // The last perspective record is the active scene projection. The
         // first one may use a shorter near plane for sky/background draws.
@@ -1036,32 +1096,116 @@ impl Inner {
             .filter(|m| m.view_proj[2][3].abs() > 0.5)
             .last();
         if let (Some(eyes), Some(source)) = (eyes, source) {
+            self.vr_reprojections = eyes.map(|eye| {
+                built
+                    .frame
+                    .matrices
+                    .iter()
+                    .map(|m| vr::reproject(eye, m.view_proj))
+                    .collect()
+            });
             if let (Some(left), Some(right)) = (
                 vr::reproject(eyes[0], source.view_proj),
                 vr::reproject(eyes[1], source.view_proj),
             ) {
                 for (index, reprojection) in [left, right].into_iter().enumerate() {
                     self.vr_eye = Some((index, reprojection));
-                    self.draw_built(mem);
+                    self.draw_built(mem, &batches, index != 0, false);
                 }
                 self.vr_eye = None;
+                self.vr_ui = true;
+                std::mem::swap(&mut self.targets, &mut self.ui_targets);
+                self.draw_built(mem, &batches, true, false);
+                std::mem::swap(&mut self.targets, &mut self.ui_targets);
+                self.vr_ui = false;
+                self.vr_last_batches = Some(batches);
                 return;
             }
         }
-        self.draw_built(mem);
+        if eyes.is_some() && source.is_none() {
+            // Menus have no perspective view. Their 2D draws become a
+            // spatial UI card without fabricating a stereo world image.
+            self.present.clear();
+            self.vr_ui = true;
+            self.vr_menu = true;
+            std::mem::swap(&mut self.targets, &mut self.ui_targets);
+            self.draw_built(mem, &batches, false, false);
+            std::mem::swap(&mut self.targets, &mut self.ui_targets);
+            self.vr_ui = false;
+            self.vr_menu = false;
+            return;
+        }
+        self.ui_present = None;
+        self.draw_built(mem, &batches, false, false);
+    }
+
+    fn refresh_vr_eyes(&mut self, eyes: [vr::Eye; 2]) -> bool {
+        let Some(f) = self.vr_last_published.take() else {
+            return false;
+        };
+        let Some(batches) = self.vr_last_batches.take() else {
+            self.vr_last_published = Some(f);
+            return false;
+        };
+        let source = f
+            .built
+            .frame
+            .matrices
+            .iter()
+            .filter(|m| m.view_proj[2][3].abs() > 0.5)
+            .last();
+        let fallback = source.and_then(|m| {
+            Some([
+                vr::reproject(eyes[0], m.view_proj)?,
+                vr::reproject(eyes[1], m.view_proj)?,
+            ])
+        });
+        if let Some(fallback) = fallback {
+            self.vr_reprojections = eyes.map(|eye| {
+                f.built
+                    .frame
+                    .matrices
+                    .iter()
+                    .map(|m| vr::reproject(eye, m.view_proj))
+                    .collect()
+            });
+            for (index, matrix) in fallback.into_iter().enumerate() {
+                self.vr_eye = Some((index, matrix));
+                self.draw_built(&f.mem, &batches, true, true);
+            }
+            self.vr_eye = None;
+        }
+        self.vr_last_batches = Some(batches);
+        self.vr_last_published = Some(f);
+        fallback.is_some()
     }
 
     /// Draw the geometry built last (`Build::run`).
-    fn draw_built(&mut self, mem: &dyn Mem) {
+    fn draw_built(
+        &mut self,
+        mem: &dyn Mem,
+        batches: &[gs::Batch],
+        reuse_scene_inputs: bool,
+        view_only: bool,
+    ) {
         let t_built = web_time::Instant::now();
         self.timing.0 += 1;
         let p0 = (self.gs.prims, self.gs.dropped, self.gs.unknown_tex);
         let (w, h) = self.gs.size;
-        let (pw, ph) = self.out_size.unwrap_or((w * self.scale, h * self.scale));
+        // The original UI is authored at the GS resolution (typically
+        // 640x448). A 1024-square texture stays sharp on the spatial panel
+        // without paying for a third 1920-square render each game frame.
+        let (pw, ph) = if self.vr_ui {
+            (1024, 1024)
+        } else {
+            self.out_size.unwrap_or((w * self.scale, h * self.scale))
+        };
         self.fxy = (pw as f32 / w as f32, ph as f32 / h as f32);
         self.rt_scale = (self.fxy.0.max(self.fxy.1).round() as u32).clamp(1, 8);
         self.ensure_targets(pw, ph);
-        self.ensure_rts();
+        if !self.vr_ui || self.vr_menu {
+            self.ensure_rts();
+        }
         self.stats.prims += self.gs.prims - p0.0;
         self.stats.dropped += self.gs.dropped - p0.1;
         self.stats.unknown_tex += self.gs.unknown_tex - p0.2;
@@ -1077,6 +1221,11 @@ impl Inner {
                 std::mem::size_of_val(&self.gs.verts[..]),
             )
         };
+        let upload_verts = !reuse_scene_inputs
+            || self
+                .vbuf
+                .as_ref()
+                .is_none_or(|b| b.size() < vbytes.len() as u64);
         let vbuf = grow_buffer(
             &self.dev,
             &mut self.vbuf,
@@ -1084,7 +1233,11 @@ impl Inner {
             wgpu::BufferUsages::VERTEX,
             "ssx3-gfx verts",
         );
-        if !vbytes.is_empty() {
+        // Each VR eye and the UI read the same immutable GS/VU geometry.
+        // Queue writes are ordered before the first eye's submission, so
+        // later passes can reuse the uploaded buffers without sending the
+        // full scene again. Per-eye uniforms are still written separately.
+        if upload_verts && !vbytes.is_empty() {
             self.queue.write_buffer(&vbuf, 0, vbytes);
         }
         // Sun shadows (shadow.rs): this frame's light, the map and its
@@ -1113,7 +1266,7 @@ impl Inner {
                 self.key_light, projector
             );
         }
-        if self.gs.key_count > 0 {
+        if !reuse_scene_inputs && self.gs.key_count > 0 {
             let n = self.gs.key_count as f32;
             for c in 0..3 {
                 self.live_ambient[c] =
@@ -1138,7 +1291,7 @@ impl Inner {
         }
         let k = self.gs.key_light;
         let kn = (k[0] * k[0] + k[1] * k[1] + k[2] * k[2]).sqrt();
-        if kn > 1e-3 {
+        if !reuse_scene_inputs && kn > 1e-3 {
             let p = self.key_light;
             let m: [f32; 3] = std::array::from_fn(|i| p[i] * 0.9 + k[i] / kn * 0.1);
             let mn = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt().max(1e-6);
@@ -1194,10 +1347,14 @@ impl Inner {
         } else {
             self.shadow.as_ref().map_or(1, |s| s.size)
         };
-        if self.shadow.as_ref().is_none_or(|s| s.size != map_size) {
+        let shadow_changed = self.shadow.as_ref().is_none_or(|s| s.size != map_size);
+        if shadow_changed {
             self.shadow = Some(shadow::Shadow::new(&self.dev, map_size));
         }
-        if let (Some(c), true) = (self.world_casters.clone(), light.is_some()) {
+        if let (Some(c), true) = (
+            self.world_casters.clone(),
+            light.is_some() && (!reuse_scene_inputs || shadow_changed),
+        ) {
             self.shadow
                 .as_mut()
                 .unwrap()
@@ -1236,7 +1393,9 @@ impl Inner {
             ground: std::array::from_fn(|c| g.ground[c] * amb[c]),
             exposure: g.exposure,
         };
-        sh.upload(&self.queue, light.as_ref(), shadow::show(), lt);
+        if !reuse_scene_inputs || shadow_changed {
+            sh.upload(&self.queue, light.as_ref(), shadow::show(), lt);
+        }
         // GPU-computed draws (ssx3_render::gpu): their uniforms, inputs and
         // triangle lists, bound as group 1 (and again with the placeholder
         // shadow map for the shadow pass).
@@ -1253,6 +1412,14 @@ impl Inner {
             let data = bytes(g.data.as_flattened());
             let idx = bytes(&g.indices);
             let of = bytes(&g.call_start);
+            let upload_gpu = !reuse_scene_inputs
+                || self
+                    .gbuf
+                    .iter()
+                    .zip([calls.len(), data.len(), idx.len(), of.len()])
+                    .any(|(b, len)| {
+                        b.as_ref().is_none_or(|b| b.size() < (len as u64).max(256))
+                    });
             static DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *DBG.get_or_init(|| std::env::var_os("DBG_UPLOAD").is_some()) {
                 eprintln!("[upload] calls {} KiB, data {} KiB, indices {} KiB, call starts {} KiB, verts {} KiB", calls.len() >> 10, data.len() >> 10, idx.len() >> 10, of.len() >> 10, vbytes.len() >> 10);
@@ -1262,14 +1429,18 @@ impl Inner {
             let db = grow_buffer(&self.dev, db, (data.len() as u64).max(256), wgpu::BufferUsages::STORAGE, "ssx3-gfx gpu data");
             let ib = grow_buffer(&self.dev, ib, (idx.len() as u64).max(256), wgpu::BufferUsages::STORAGE, "ssx3-gfx gpu indices");
             let ob = grow_buffer(&self.dev, ob, (of.len() as u64).max(256), wgpu::BufferUsages::STORAGE, "ssx3-gfx gpu call starts");
-            self.queue.write_buffer(&cb, 0, calls);
-            if !data.is_empty() {
+            if upload_gpu {
+                self.queue.write_buffer(&cb, 0, calls);
+            }
+            if upload_gpu && !data.is_empty() {
                 self.queue.write_buffer(&db, 0, data);
             }
-            if !idx.is_empty() {
+            if upload_gpu && !idx.is_empty() {
                 self.queue.write_buffer(&ib, 0, idx);
             }
-            self.queue.write_buffer(&ob, 0, of);
+            if upload_gpu {
+                self.queue.write_buffer(&ob, 0, of);
+            }
             // The arena: what is new since the last upload (all of it when
             // it was cleared or outgrew its buffer).
             let ab = {
@@ -1312,7 +1483,7 @@ impl Inner {
             group(true)
         });
         // Plans per batch, uniforms, bind groups.
-        let batches = std::mem::take(&mut self.gs.batches);
+        // The same build list is shared by both VR eyes.
         // With sun shadows the game's own rider shadows go: the render
         // targets its silhouettes (mat6 entry 0x20) are drawn into, and every
         // draw that projects them (`SSX3_SHADOW_DEBUG=game-shadows` keeps
@@ -1384,6 +1555,13 @@ impl Inner {
         let time = self.t0.elapsed().as_secs_f32();
         for (bi, b) in batches.iter().enumerate() {
             let st = &b.state;
+            if st.target == self.gs.main_fbp {
+                if self.vr_ui && !self.vr_menu && !b.tag.hud || self.vr_eye.is_some() && b.tag.hud {
+                    continue;
+                }
+            } else if self.vr_ui && !self.vr_menu {
+                continue;
+            }
             // The game's bloom, replaced or off.
             if !opts.keeps_post(b.tag.post) {
                 continue;
@@ -1569,6 +1747,7 @@ impl Inner {
             let vr_world = self.vr_eye.is_some()
                 && st.target == self.gs.main_fbp
                 && !b.tag.hud
+                && !b.tag.screen
                 && b.tag.post.is_none();
             let scissor = (x0 <= x1 && y0 <= y1 && x0 < tw && y0 < th).then(|| {
                 if vr_world {
@@ -1780,7 +1959,12 @@ impl Inner {
                     )
                 });
                 let reprojection = if vr_world {
-                    self.vr_eye.map(|(_, m)| m)
+                    self.vr_eye.map(|(eye, fallback)| {
+                        self.vr_reprojections[eye]
+                            .get(b.tag.matrix as usize)
+                            .and_then(|m| *m)
+                            .unwrap_or(fallback)
+                    })
                 } else {
                     None
                 };
@@ -1825,7 +2009,7 @@ impl Inner {
                 });
             }
         }
-        if items.is_empty() {
+        if items.is_empty() && !self.vr_ui {
             return;
         }
         let t_prepared = web_time::Instant::now();
@@ -1905,10 +2089,10 @@ impl Inner {
         }
         // The renderer's own passes: AO before the game's post passes, the
         // rest before the HUD (or at the end of a frame without them).
-        let hud_post = opts.bloom == Bloom::Modern || opts.aa != Aa::Off;
+        let hud_post = !self.vr_ui && (opts.bloom == Bloom::Modern || opts.aa != Aa::Off);
         // (Sun shadows are applied by the draws themselves: they need the
         // split only for their debug views.)
-        let ao_at = if opts.ao || (opts.shadows && post::debug_view() != 0.0) {
+        let ao_at = if !self.vr_ui && (opts.ao || (opts.shadows && post::debug_view() != 0.0)) {
             items
                 .iter()
                 .position(|it| it.tag.post.is_some() || it.tag.hud)
@@ -1937,7 +2121,7 @@ impl Inner {
             .as_ref()
             .and_then(|s| s.cutouts.as_ref())
             .map(|c| c.1.clone());
-        if let (true, Some(runs), Some(_)) = (native_terrain, runs, light.as_ref()) {
+        if let (true, Some(runs), Some(_)) = (native_terrain && !self.vr_ui, runs, light.as_ref()) {
             let texman = frame::word(mem, self.frame_gm + frame::gm::TEXMAN);
             let samp = self.dev.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("ssx3-gfx cut-out"),
@@ -1981,12 +2165,15 @@ impl Inner {
         let dv = t.depth.create_view(&Default::default());
         let mut enc = self.dev.create_command_encoder(&Default::default());
         let main = self.gs.main_fbp;
-        // Sun shadows: the 3D draws before the game's post passes again,
-        // into the shadow map (shadow.rs), before everything else.
-        if let (Some(l), Some(gb), false) = (
+        // The sun map uses the game's unchanged chase camera and this
+        // frame's shared geometry. Once the first VR eye has drawn it, the
+        // second eye and tracked-view refreshes can sample the same map.
+        if let (Some(l), Some(gb), false, false, false) = (
             light.as_ref(),
             gpu_bind_shadow.as_ref(),
             shadow::debug("no-pass"),
+            self.vr_ui,
+            reuse_scene_inputs,
         ) {
             let sh = self.shadow.as_ref().unwrap();
             let caster_runs: Vec<Vec<(u32, u32)>> = (0..shadow::CASCADES)
@@ -2093,7 +2280,8 @@ impl Inner {
         let mut copied = 0u64;
         // A pass on target `fbp`; depth starts cleared on a target's first
         // pass of the frame.
-        let vr_frame = self.vr_eye.is_some();
+        let vr_ui = self.vr_ui;
+        let vr_frame = self.vr_eye.is_some() || vr_ui;
         let begin =
             |enc: &mut wgpu::CommandEncoder, fbp: u32, first: bool| -> wgpu::RenderPass<'static> {
                 let (c, d) = if fbp == main {
@@ -2114,7 +2302,9 @@ impl Inner {
                         ops: wgpu::Operations {
                             // (The lighting fit's views start from black:
                             // they draw the terrain only.)
-                            load: if first && fbp == main && (shadow::fitting_view() || vr_frame) {
+                            load: if first && fbp == main && vr_ui {
+                                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                            } else if first && fbp == main && (shadow::fitting_view() || vr_frame) {
                                 wgpu::LoadOp::Clear(wgpu::Color::BLACK)
                             } else {
                                 wgpu::LoadOp::Load
@@ -2177,7 +2367,10 @@ impl Inner {
         });
         let phase1_end = self.phase1_end;
         let mut depth_taken = false;
-        let gather = self.want_depth.then(|| {
+        // Game depth queries advance only with the simulation. A view-only
+        // refresh must not publish another eye's Z buffer as a new tick.
+        let want_depth = self.want_depth && !self.vr_ui && !view_only;
+        let gather = want_depth.then(|| {
             self.depth_query
                 .prepare(&self.dev, &self.queue, &t.depth, (t.w, t.h), (w, h))
         });
@@ -2238,7 +2431,7 @@ impl Inner {
                 prev_frame = false;
                 changed = all;
             }
-            if self.want_depth && !depth_taken && it.batch >= phase1_end {
+            if want_depth && !depth_taken && it.batch >= phase1_end {
                 depth_taken = true;
                 drop(pass);
                 take_depth(&mut enc);
@@ -2461,20 +2654,24 @@ impl Inner {
                 po.before_hud(&self.dev, &self.queue, &mut enc, &post_frame, &opts);
             }
         }
-        if self.want_depth && !depth_taken {
+        if want_depth && !depth_taken {
             take_depth(&mut enc);
         }
         // The image on screen, for the window.
-        let shown = match self.display_fbp.and_then(|f| self.rts.get(&f)) {
+        let shown = match (!self.vr_ui)
+            .then(|| self.display_fbp.and_then(|f| self.rts.get(&f)))
+            .flatten()
+        {
             Some(r) => &r.color,
             None => &t.color,
         };
         let (slots, slot) = self.vr_eye.map_or((1, 0), |(eye, _)| (2, eye));
-        if self.present.len() != slots
-            || self
-                .present
-                .first()
-                .is_some_and(|p| (p.width(), p.height()) != (t.w, t.h))
+        if !self.vr_ui
+            && (self.present.len() != slots
+                || self
+                    .present
+                    .first()
+                    .is_some_and(|p| (p.width(), p.height()) != (t.w, t.h)))
         {
             self.present = (0..slots)
                 .map(|_| {
@@ -2497,6 +2694,34 @@ impl Inner {
                 })
                 .collect();
         }
+        if self.vr_ui
+            && self
+                .ui_present
+                .as_ref()
+                .is_none_or(|p| (p.width(), p.height()) != (t.w, t.h))
+        {
+            self.ui_present = Some(self.dev.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ssx3-gfx VR HUD"),
+                size: wgpu::Extent3d {
+                    width: t.w,
+                    height: t.h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+            }));
+        }
+        let destination = if self.vr_ui {
+            self.ui_present.as_ref().unwrap()
+        } else {
+            &self.present[slot]
+        };
         enc.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: shown,
@@ -2505,7 +2730,7 @@ impl Inner {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyTextureInfo {
-                texture: &self.present[slot],
+                texture: destination,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -2924,7 +3149,7 @@ struct Build {
 }
 
 impl Build {
-    fn run(b: &mut Build, built: &Built, mem: &(dyn Mem + Sync)) {
+    fn run(b: &mut Build, built: &Built, mem: &(dyn Mem + Sync), vr_active: bool) {
         let fr = &built.frame;
         let d = &fr.display;
         let (w, h) = (d.fb_width.clamp(64, 2048), d.fb_height.clamp(64, 2048));
@@ -2952,6 +3177,21 @@ impl Build {
             }
         }
         let draws: Vec<&frame::Draw> = fr.draws().collect();
+        let vr_sky_dome = vr_active
+            && std::env::var("SSX3_VR_SKY_FILL").map_or(true, |v| v != "0")
+            && draws.first().is_some_and(|d| {
+                d.matrix == 0 && d.state.material == Material::General && d.state.layer == 0
+            });
+        let sky_draws = if vr_sky_dome {
+            draws
+                .iter()
+                .take_while(|d| {
+                    d.matrix == 0 && d.state.material == Material::General && d.state.layer == 0
+                })
+                .count()
+        } else {
+            0
+        };
         // The PATH3 chains (GifBuff), one per phase, kicked with PATH3
         // masked (the kick thread writes MSKPATH3 1 into the VIF1 FIFO
         // first). As on the GS (`ssx3_ps2::gs::Mtgs::set_path3_mask`), each
@@ -2994,9 +3234,20 @@ impl Build {
             .iter()
             .position(|&q| q as u64 == 0x1000_0000_0000_8010)
             .unwrap_or(0);
+        // The PS2 frame blend copies the completed image into a second full
+        // screen buffer. In VR that copy is repeated for each eye and blurs
+        // head-tracked motion. Keep the game's draw-buffer setup, but present
+        // the sharp eye image directly unless the original blend is requested.
+        let frame_blend = split > 0
+            && (!vr_active || std::env::var("SSX3_VR_MOTION_BLUR").is_ok_and(|v| v == "1"));
         label(&mut b.gs, "flip".into());
+        b.gs.tag = gs::Tag {
+            screen: true,
+            ..Default::default()
+        };
         b.gs.gif(&flip[split..]);
-        b.display_fbp = (split > 0)
+        b.gs.tag = gs::Tag::default();
+        b.display_fbp = frame_blend
             .then(|| d.draw_fbp + (d.fb_width.div_ceil(64) * d.fb_height.div_ceil(32)).max(1));
         let mode = dbg.path3;
         let mut p3: std::collections::VecDeque<(Vec<u128>, Option<ssx3_render::direct::PostKind>)> =
@@ -3029,6 +3280,47 @@ impl Build {
         // output in order (`VuPlan`).
         let plan = Build::plan_vu_calls(b, built, &draws);
         let mut vu = VuReceiver::default();
+        let mut sky_dome_calls = Vec::new();
+        // Snow Jam's panels have been checked against the VR panorama.
+        // Other courses share this geometry but use different texture
+        // layouts, so validate the complete native sequence before replacing it.
+        let supported_panorama_sky = sky_draws >= 7
+            && [281, 289, 288, 287, 282, 286, 285]
+                .into_iter()
+                .enumerate()
+                .all(|(n, texture)| draws[n].tex[0] == Some(texture));
+        let panorama_sky = vr_sky_dome
+            && supported_panorama_sky
+            && std::env::var("SSX3_VR_SKY_PANORAMA").map_or(true, |v| v != "0");
+        let supported_ridge_sky = vr_sky_dome
+            && sky_draws >= 7
+            && [508, 516, 515, 514, 509, 513, 512]
+                .into_iter()
+                .enumerate()
+                .all(|(n, texture)| draws[n].tex[0] == Some(texture));
+        let ridge_panorama = supported_ridge_sky
+            && std::env::var("SSX3_VR_SKY_RIDGE_PANO").map_or(true, |v| v != "0");
+        let city_panorama = vr_sky_dome
+            && sky_draws >= 8
+            && [420, 428, 427, 426, 421, 425, 423, 422]
+                .into_iter()
+                .enumerate()
+                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
+            && std::env::var("SSX3_VR_SKY_CITY_PANO").map_or(true, |v| v != "0");
+        let wrapped_sky = supported_ridge_sky
+            && !ridge_panorama
+            && std::env::var("SSX3_VR_SKY_WRAP").is_ok_and(|v| v == "1");
+        let sphere_sky = vr_sky_dome && std::env::var_os("SSX3_VR_SKY_SPHERE").is_some();
+        let replace_blue_sky =
+            panorama_sky || ridge_panorama || city_panorama || wrapped_sky || sphere_sky;
+        let sky_last = vr_sky_dome
+            .then(|| {
+                built
+                    .events
+                    .iter()
+                    .rposition(|(owner, _)| matches!(owner, Owner::Payload(0)))
+            })
+            .flatten();
         std::thread::scope(|sc| {
             // The helper workers (the browser) take every chunk up front;
             // without threads, this thread does.
@@ -3065,6 +3357,7 @@ impl Build {
                 // The batches' tag: the draw's material (none between draws).
                 let m = n.and_then(|n| draws.get(n)).map(|d| d.state.material);
                 b.gs.tag = gs::Tag {
+                    matrix: n.and_then(|n| draws.get(n)).map_or(0, |d| d.matrix as u16),
                     terrain: matches!(m, Some(Material::Bezier1 | Material::Bezier2)),
                     ..Default::default()
                 };
@@ -3110,7 +3403,100 @@ impl Build {
                                 b.stats.vu_native += 1;
                                 b.stats.vu_gpu += 1;
                                 for c in g {
-                                    b.gs.gpu_draw(c);
+                                    if vr_sky_dome && matches!(owner, Owner::Payload(0)) {
+                                        sky_dome_calls.push(c.clone());
+                                    }
+                                    if (panorama_sky || ridge_panorama || city_panorama)
+                                        && matches!(owner, Owner::Payload(n) if *n > 0 && *n < sky_draws)
+                                    {
+                                        let xy = b.gs.ctx[0].xyoffset;
+                                        let xyoffset = [
+                                            (xy & 0xffff) as f32 / 16.0,
+                                            ((xy >> 32) & 0xffff) as f32 / 16.0,
+                                        ];
+                                        let panels = n
+                                            .and_then(|n| draws.get(n))
+                                            .and_then(|draw| {
+                                                built.frame.matrices.get(draw.matrix as usize)
+                                            })
+                                            .and_then(|matrix| {
+                                                if ridge_panorama || city_panorama {
+                                                    vr::sky_native_panorama_panels(
+                                                        &c,
+                                                        matrix.view_proj,
+                                                        xyoffset,
+                                                        b.gs.size,
+                                                    )
+                                                } else {
+                                                    vr::sky_panorama_panels(&c, matrix.view_proj)
+                                                }
+                                            });
+                                        if let Some(panels) = panels {
+                                            for panel in panels {
+                                                let first = b.gs.batches.len();
+                                                b.gs.gpu_draw(panel);
+                                                for batch in &mut b.gs.batches[first..] {
+                                                    if batch.gpu.is_some() {
+                                                        batch.state.prim |= 1 << 6;
+                                                        batch.state.ctx.alpha = 0x44;
+                                                        batch.state.ctx.test &= !1;
+                                                        batch.state.ctx.zbuf |= 1 << 32;
+                                                    }
+                                                }
+                                            }
+                                        } else if !c.pre.is_empty() {
+                                            b.gs.gif(&c.pre);
+                                        }
+                                        continue;
+                                    }
+                                    if wrapped_sky
+                                        && matches!(owner, Owner::Payload(n) if *n > 0 && *n < sky_draws)
+                                    {
+                                        let xy = b.gs.ctx[0].xyoffset;
+                                        let xyoffset = [
+                                            (xy & 0xffff) as f32 / 16.0,
+                                            ((xy >> 32) & 0xffff) as f32 / 16.0,
+                                        ];
+                                        let wrapped = n
+                                            .and_then(|n| draws.get(n))
+                                            .and_then(|d| {
+                                                built.frame.matrices.get(d.matrix as usize)
+                                            })
+                                            .and_then(|m| {
+                                                vr::sky_wrap_native_panel(
+                                                    &c,
+                                                    m.view_proj,
+                                                    xyoffset,
+                                                    b.gs.size,
+                                                )
+                                            });
+                                        if let Some(wrapped) = wrapped {
+                                            let first = b.gs.batches.len();
+                                            b.gs.gpu_draw(wrapped);
+                                            for batch in &mut b.gs.batches[first..] {
+                                                if batch.gpu.is_some() {
+                                                    batch.state.ctx.zbuf |= 1 << 32;
+                                                }
+                                            }
+                                        } else if !c.pre.is_empty() {
+                                            b.gs.gif(&c.pre);
+                                        }
+                                        continue;
+                                    }
+                                    if sphere_sky
+                                        && !panorama_sky
+                                        && !ridge_panorama
+                                        && !city_panorama
+                                        && matches!(owner, Owner::Payload(n) if *n > 0 && *n < sky_draws)
+                                    {
+                                        if !c.pre.is_empty() {
+                                            b.gs.gif(&c.pre);
+                                        }
+                                        continue;
+                                    }
+                                    if !replace_blue_sky || !matches!(owner, Owner::Payload(0)) {
+                                        b.gs.gpu_draw(c);
+                                    }
                                 }
                             }
                             Some(CallOut::Native(_)) | None => b.stats.vu_missing += 1,
@@ -3144,6 +3530,33 @@ impl Build {
                     }
                     _ => {}
                 }
+                if Some(i) == sky_last {
+                    let complete = if panorama_sky || ridge_panorama || city_panorama || wrapped_sky
+                    {
+                        if let Some(sphere) = vr::sky_dome_background(&sky_dome_calls) {
+                            b.gs.gpu_draw(sphere);
+                        }
+                        true
+                    } else if sphere_sky {
+                        if let Some(sphere) = vr::sky_dome_background(&sky_dome_calls) {
+                            b.gs.gpu_draw(sphere);
+                            true
+                        } else {
+                            for call in &sky_dome_calls {
+                                b.gs.gpu_draw(call.clone());
+                            }
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !complete {
+                        if let Some(extension) = vr::sky_dome_lower_band(&sky_dome_calls) {
+                            b.gs.gpu_draw(extension);
+                        }
+                    }
+                    sky_dome_calls.clear();
+                }
             }
             if !phase2_started {
                 b.phase1_end = b.gs.batches.len();
@@ -3158,7 +3571,7 @@ impl Build {
         while let Some(pk) = p3.pop_front() {
             path3(&mut b.gs, pk);
         }
-        if split > 0 {
+        if frame_blend {
             label(&mut b.gs, "flip-blend".into());
             b.gs.hud = false;
             b.gs.gif(&flip[..split]);

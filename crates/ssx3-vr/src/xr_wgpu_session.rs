@@ -14,6 +14,40 @@ use crate::xr_wgpu::WgpuXr;
 pub const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const TEST_FRAMES: u32 = 144;
 
+/// CPU-side OpenXR handoff stages. `gpu_wait_ms` is a queue completion wait,
+/// not an isolated measurement of either eye's GPU render time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlitTiming {
+    pub acquire_wait_ms: f64,
+    pub encode_submit_ms: f64,
+    pub gpu_wait_ms: f64,
+    pub release_ms: f64,
+}
+
+#[derive(Clone, Copy)]
+pub struct PanelEye {
+    pub game_from_eye: [[f32; 4]; 4],
+    /// Projection X/Y scales followed by X/Y offsets.
+    pub clip: [f32; 4],
+}
+
+#[derive(Clone, Copy)]
+pub struct PanelConfig {
+    pub width: f32,
+    pub height: f32,
+    pub distance: f32,
+    pub y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PanelUniform {
+    game_from_eye: [[f32; 4]; 4],
+    clip: [f32; 4],
+    size_distance_height: [f32; 4],
+    world_valid: [f32; 4],
+}
+
 pub struct StereoTarget {
     // Textures are destroyed before the swapchain they refer to.
     textures: Vec<wgpu::Texture>,
@@ -23,9 +57,15 @@ pub struct StereoTarget {
     panel_layout: wgpu::BindGroupLayout,
     panel_pipeline: wgpu::RenderPipeline,
     panel_sampler: wgpu::Sampler,
+    panel_uniforms: [wgpu::Buffer; 2],
 }
 
 impl StereoTarget {
+    /// Recommended OpenXR image extent for each eye.
+    pub fn eye_size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     pub fn new(
         xr_instance: &xr::Instance,
         system: xr::SystemId,
@@ -146,6 +186,28 @@ impl StereoTarget {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<PanelUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
             ],
         });
         let panel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -188,6 +250,18 @@ impl StereoTarget {
             multiview_mask: None,
             cache: None,
         });
+        let panel_uniforms = std::array::from_fn(|eye| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(if eye == 0 {
+                    "SSX 3 VR left UI panel"
+                } else {
+                    "SSX 3 VR right UI panel"
+                }),
+                size: std::mem::size_of::<PanelUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
         println!(
             "OpenXR wgpu swapchain: {width}x{height}x2, {vk_format:?}, {} images",
             textures.len()
@@ -200,6 +274,7 @@ impl StereoTarget {
             panel_layout,
             panel_pipeline,
             panel_sampler,
+            panel_uniforms,
         })
     }
 
@@ -273,14 +348,19 @@ impl StereoTarget {
     pub fn blit_stereo(
         &self,
         graphics: &WgpuXr,
-        sources: [&wgpu::TextureView; 2],
-    ) -> Result<(), Box<dyn Error>> {
+        sources: Option<[&wgpu::TextureView; 2]>,
+        hud: &wgpu::TextureView,
+        panel_eyes: [PanelEye; 2],
+        panel: PanelConfig,
+    ) -> Result<BlitTiming, Box<dyn Error>> {
+        let acquire_start = Instant::now();
         let mut swapchain = self
             .swapchain
             .lock()
             .map_err(|_| "OpenXR swapchain lock poisoned")?;
         let index = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
+        let encode_start = Instant::now();
         let texture = self
             .textures
             .get(index)
@@ -291,6 +371,21 @@ impl StereoTarget {
                 label: Some("SSX 3 VR game image blit"),
             });
         for eye in 0..2 {
+            let uniform = PanelUniform {
+                game_from_eye: panel_eyes[eye].game_from_eye,
+                clip: panel_eyes[eye].clip,
+                size_distance_height: [panel.width, panel.height, panel.distance, panel.y],
+                world_valid: [if sources.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &uniform as *const PanelUniform as *const u8,
+                    std::mem::size_of::<PanelUniform>(),
+                )
+            };
+            graphics
+                .queue
+                .write_buffer(&self.panel_uniforms[eye], 0, bytes);
             let bind_group = graphics
                 .device
                 .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -299,11 +394,21 @@ impl StereoTarget {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(sources[eye]),
+                            resource: wgpu::BindingResource::TextureView(
+                                sources.map_or(hud, |s| s[eye]),
+                            ),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::Sampler(&self.panel_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(hud),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.panel_uniforms[eye].as_entire_binding(),
                         },
                     ],
                 });
@@ -334,12 +439,19 @@ impl StereoTarget {
             pass.draw(0..3, 0..1);
         }
         let submitted = graphics.queue.submit(Some(encoder.finish()));
+        let gpu_start = Instant::now();
         graphics.device.poll(wgpu::PollType::Wait {
             submission_index: Some(submitted),
             timeout: None,
         })?;
+        let release_start = Instant::now();
         swapchain.release_image()?;
-        Ok(())
+        Ok(BlitTiming {
+            acquire_wait_ms: (encode_start - acquire_start).as_secs_f64() * 1000.0,
+            encode_submit_ms: (gpu_start - encode_start).as_secs_f64() * 1000.0,
+            gpu_wait_ms: (release_start - gpu_start).as_secs_f64() * 1000.0,
+            release_ms: release_start.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     pub fn submit_frame(
@@ -415,6 +527,21 @@ pub fn create_session(
     // local borrows. Its guard keeps the backing wgpu objects alive.
     let guard = Box::new((graphics.instance.clone(), graphics.device.clone()));
     Ok(unsafe { xr.create_session_with_guard::<xr::Vulkan>(system, &create, guard)? })
+}
+
+#[cfg(test)]
+mod panel_tests {
+    #[test]
+    fn spatial_hud_shader_is_valid_wgsl() {
+        let module = naga::front::wgsl::parse_str(include_str!("vr_panel.wgsl"))
+            .expect("VR compositing shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("VR compositing shader validates");
+    }
 }
 
 pub fn probe(

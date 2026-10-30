@@ -2133,11 +2133,213 @@ pub(crate) mod nash {
 
     pub const PATCHES: u32 = 0x50ac;
 
+    /// The visible instance list, before any later rendering work.
+    pub const INSTANCE_COUNT: u32 = 0x209c;
+
     /// Every list count the pass resets, in the original store order.
     pub const CLEARED: [u32; 13] = [
         0x94, 0x1098, 0x209c, 0x40a0, 0x50a8, 0x70ac, 0x78b4, 0x7abc, 0x7bc0, 0x7fc4, 0x50a4,
         0x78b0, 0x7ab8,
     ];
+}
+
+/// Recover the chase camera's world-space eye from the world-to-clip matrix
+/// Nash uses for its normal cull. At the eye, clip X, Y and W are zero.
+fn nash_eye_center(mut read: impl FnMut(u32) -> u32, matrix: u32) -> Option<[f32; 3]> {
+    let m: [[f64; 4]; 4] = std::array::from_fn(|row| {
+        std::array::from_fn(|col| f32::from_bits(read(matrix + (16 * row + 4 * col) as u32)) as f64)
+    });
+    let mut a: [[f64; 4]; 3] = std::array::from_fn(|eq| {
+        let col = [0, 1, 3][eq];
+        [m[0][col], m[1][col], m[2][col], -m[3][col]]
+    });
+    for col in 0..3 {
+        let pivot = (col..3).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
+        if !a[pivot][col].is_finite() || a[pivot][col].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(col, pivot);
+        let divisor = a[col][col];
+        for k in col..4 {
+            a[col][k] /= divisor;
+        }
+        for row in 0..3 {
+            if row != col {
+                let factor = a[row][col];
+                for k in col..4 {
+                    a[row][k] -= factor * a[col][k];
+                }
+            }
+        }
+    }
+    let eye = std::array::from_fn(|i| a[i][3] as f32);
+    eye.iter().all(|v| v.is_finite()).then_some(eye)
+}
+
+static VR_GAZE: std::sync::Mutex<Option<[f32; 3]>> = std::sync::Mutex::new(None);
+
+/// Camera-relative direction in which the headset is looking. This affects
+/// visual publication only; it never changes the game's chase camera.
+pub fn set_vr_gaze(direction: [f32; 3]) {
+    let length = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if length.is_finite() && length > 0.001 {
+        *VR_GAZE.lock().unwrap() = Some(direction.map(|v| v / length));
+    }
+}
+
+fn nash_world_gaze(
+    mut read: impl FnMut(u32) -> u32,
+    matrix: u32,
+    gaze: [f32; 3],
+) -> Option<[f32; 3]> {
+    let axes: [[f32; 3]; 3] = std::array::from_fn(|column| {
+        let c = [0, 1, 3][column];
+        let axis: [f32; 3] =
+            std::array::from_fn(|row| f32::from_bits(read(matrix + (16 * row + 4 * c) as u32)));
+        let length = axis.iter().map(|v| v * v).sum::<f32>().sqrt();
+        axis.map(|v| v / length)
+    });
+    let world: [f32; 3] =
+        std::array::from_fn(|i| gaze[0] * axes[0][i] + gaze[1] * axes[1][i] + gaze[2] * axes[2][i]);
+    let length = world.iter().map(|v| v * v).sum::<f32>().sqrt();
+    (length.is_finite() && length > 0.001).then(|| world.map(|v| v / length))
+}
+
+/// The Nash resident octree contains patches and instances before the game
+/// selects the forward view. Find nodes holding objects near the chase camera
+/// so one simulation tick can feed a view in any head direction. The original
+/// section checks still run when Nash collects these nodes below.
+fn nash_nearby_nodes(
+    mut read: impl FnMut(u32) -> u32,
+    roots: u32,
+    eye: [f32; 3],
+    range: f32,
+    gaze: Option<[f32; 3]>,
+) -> Vec<(f32, u32)> {
+    use std::collections::HashSet;
+    let valid = |a: u32| (0x10_0000..0x200_0000).contains(&a) && a & 3 == 0;
+    let mut stack: Vec<(u32, u32)> = (0..8).map(|k| (read(roots + 0x14 * k + 0x10), 0)).collect();
+    let mut seen_nodes = HashSet::new();
+    let mut seen_objects = HashSet::new();
+    let mut nearby = Vec::new();
+    while let Some((node, depth)) = stack.pop() {
+        if !valid(node) || depth > 40 || !seen_nodes.insert(node) {
+            continue;
+        }
+        let mut distance = f32::INFINITY;
+        for (list, sphere) in [(0x24, 0x140), (0x20, 0x50)] {
+            let mut object = read(node + list);
+            for _ in 0..4096 {
+                if !valid(object) || !seen_objects.insert(object) {
+                    break;
+                }
+                let xyz: [f32; 3] =
+                    std::array::from_fn(|i| f32::from_bits(read(object + sphere + 4 * i as u32)));
+                let radius = f32::from_bits(read(object + sphere + 12));
+                if xyz.iter().all(|v| v.is_finite()) && radius.is_finite() && radius >= 0.0 {
+                    let d2: f32 = (0..3).map(|i| (xyz[i] - eye[i]).powi(2)).sum();
+                    let near = d2 <= (5_000.0 + radius).powi(2);
+                    let in_gaze = gaze.is_none_or(|g| {
+                        let along = (0..3).map(|i| (xyz[i] - eye[i]) * g[i]).sum::<f32>();
+                        // 75-degree cone with a sphere-radius allowance.
+                        along + radius >= d2.sqrt() * 0.25881905
+                    });
+                    if d2.is_finite() && d2 <= (range + radius).powi(2) && (near || in_gaze) {
+                        distance = distance.min(d2);
+                    }
+                }
+                object = read(object);
+            }
+        }
+        if distance.is_finite() {
+            nearby.push((distance, node));
+        }
+        stack.extend((0..8).map(|i| (read(node + 4 * i), depth + 1)));
+    }
+    nearby.sort_by(|a, b| a.0.total_cmp(&b.0));
+    nearby
+}
+
+/// Promote nearby nodes to Nash's full-visibility list. Existing forward
+/// nodes are retained; promoted partial nodes are removed from the partial
+/// list to avoid drawing their objects twice. The two fixed 512-pair buffers
+/// are never overrun. Only the VR executable enables this path.
+fn nash_expand_vr_visibility(c: &mut Cpu, this: u32, roots: u32) -> u32 {
+    use std::collections::HashSet;
+    const CAPACITY: u32 = (nash::PARTIAL_COUNT - nash::VISIBLE) / 8;
+    let range = std::env::var("SSX3_VR_VIS_RANGE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && (1_000.0..=30_000.0).contains(v))
+        .unwrap_or(30_000.0);
+    let Some(eye) = nash_eye_center(|a| c.bus.read32(a), this + nash::WORLD_MATRIX) else {
+        return 0;
+    };
+    let gaze_camera = *VR_GAZE.lock().unwrap();
+    let gaze_camera = gaze_camera.or_else(|| {
+        std::env::var("SSX3_VR_TEST_YAW")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|yaw| yaw.is_finite())
+            .map(|yaw| {
+                let (s, c) = yaw.to_radians().sin_cos();
+                [s, 0.0, c]
+            })
+    });
+    let gaze = gaze_camera
+        .and_then(|g| nash_world_gaze(|a| c.bus.read32(a), this + nash::WORLD_MATRIX, g));
+    let scan_start = std::time::Instant::now();
+    // Nash's tree and its object lists are in EE RAM. The visual-only scan
+    // makes many reads; the generic bus also checks hardware aliases on
+    // each one. Keep its generic path for an unexpected root address.
+    let nearby = if (0x10_0000..=0x01ff_ff60).contains(&roots) {
+        nash_nearby_nodes(|a| c.bus.ram_u32(a), roots, eye, range, gaze)
+    } else {
+        nash_nearby_nodes(|a| c.bus.read32(a), roots, eye, range, gaze)
+    };
+    if std::env::var_os("SSX3_VR_VIS_STATS").is_some() {
+        static SAMPLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sample = SAMPLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if sample % 60 == 0 {
+            eprintln!(
+                "[vr visibility] scan {sample}: {:.3} ms, {} nodes",
+                scan_start.elapsed().as_secs_f64() * 1000.0,
+                nearby.len()
+            );
+        }
+    }
+    let mut count = c.bus.read32(this + nash::VISIBLE_COUNT).min(CAPACITY);
+    let mut visible = HashSet::new();
+    for i in 0..count {
+        visible.insert(c.bus.read32(this + nash::VISIBLE + 8 * i));
+    }
+    let initial = count;
+    for (_, node) in nearby {
+        if count >= CAPACITY {
+            break;
+        }
+        if visible.insert(node) {
+            c.bus.write32(this + nash::VISIBLE + 8 * count, node);
+            c.bus.write32(this + nash::VISIBLE + 8 * count + 4, 0);
+            count += 1;
+        }
+    }
+    c.bus.write32(this + nash::VISIBLE_COUNT, count);
+    let partial = c.bus.read32(this + nash::PARTIAL_COUNT).min(CAPACITY);
+    let mut kept = 0;
+    for i in 0..partial {
+        let node = c.bus.read32(this + nash::PARTIAL + 8 * i);
+        if !visible.contains(&node) {
+            let clip = c.bus.read32(this + nash::PARTIAL + 8 * i + 4);
+            if kept != i {
+                c.bus.write32(this + nash::PARTIAL + 8 * kept, node);
+                c.bus.write32(this + nash::PARTIAL + 8 * kept + 4, clip);
+            }
+            kept += 1;
+        }
+    }
+    c.bus.write32(this + nash::PARTIAL_COUNT, kept);
+    count - initial
 }
 
 /// gp offset (negative) of the graphics object (`D_004A289C`): the camera
@@ -2235,6 +2437,15 @@ pub fn nash_gather_visible(c: &mut Cpu) {
                 callee::NASH_CULL_NODE.call(c, 0x0022_aef0 + root)?;
             }
         }
+        static VR_VISIBILITY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let vr_added = if *VR_VISIBILITY
+            .get_or_init(|| std::env::var("SSX3_VR_VISIBILITY").is_ok_and(|value| value == "1"))
+        {
+            let roots = r32(c, S3);
+            nash_expand_vr_visibility(c, this, roots)
+        } else {
+            0
+        };
         // Collect from the visible list, classify the partial list.
         c.cycles += 34;
         c.g[S0][0] = sx(at(c, S2, nash::VISIBLE));
@@ -2260,6 +2471,33 @@ pub fn nash_gather_visible(c: &mut Cpu) {
             c.g[A0][0] = c.g[S2][0];
             c.g[A1][0] = c.g[S1][0];
             f.call(c, ret_addr)?;
+        }
+        if std::env::var_os("SSX3_VR_VIS_STATS").is_some() {
+            static SAMPLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sample = SAMPLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if sample % 60 == 0 {
+                eprintln!(
+                    "[vr visibility] sample {sample}: nodes visible {} partial {}, patches {}, instances {}, vr added {vr_added}",
+                    c.bus.read32(this + nash::VISIBLE_COUNT),
+                    c.bus.read32(this + nash::PARTIAL_COUNT),
+                    c.bus.read32(this + nash::PATCH_COUNT),
+                    c.bus.read32(this + nash::INSTANCE_COUNT),
+                );
+                if sample == 0 {
+                    for (name, base) in
+                        [("camera", nash::VIEW_MATRIX), ("world", nash::WORLD_MATRIX)]
+                    {
+                        let rows: [[f32; 4]; 4] = std::array::from_fn(|row| {
+                            std::array::from_fn(|col| {
+                                f32::from_bits(
+                                    c.bus.read32(this + base + (16 * row + 4 * col) as u32),
+                                )
+                            })
+                        });
+                        eprintln!("[vr visibility] {name} matrix: {rows:?}");
+                    }
+                }
+            }
         }
         c.g[V0][0] = c.g[S2][0];
         frame.restore(c, S0, 0x80);
@@ -3187,9 +3425,7 @@ pub(crate) mod tests {
             );
         }
     }
-    use crate::difftest::events::{check_events, schedule};
-    use crate::difftest::fakes::{self, covered, fake_call, machine, FAKE, LOG_COUNT};
-    use crate::difftest::{check, fill, scramble, Rng, DATA, GAME_GP};
+    use crate::difftest::fakes::{self, fake_call, LOG_COUNT};
     use ssx3_ee_rt::cpu::{reg::*, sx};
     use ssx3_ee_rt::Cpu;
 
@@ -3396,5 +3632,72 @@ pub(crate) mod tests {
                 gather_setup(c, &mut r);
             },
         );
+    }
+
+    #[test]
+    fn vr_visibility_recovers_eye_and_nearby_nodes() {
+        let mut words = std::collections::HashMap::<u32, u32>::new();
+        let matrix = 0x10_0000;
+        let rows = [
+            [1.0f32, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [-10.0, -20.0, -30.0, -30.0],
+        ];
+        for row in 0..4 {
+            for col in 0..4 {
+                words.insert(
+                    matrix + (16 * row + 4 * col) as u32,
+                    rows[row][col].to_bits(),
+                );
+            }
+        }
+        let read = |addr: u32| *words.get(&addr).unwrap_or(&0);
+        assert_eq!(nash_eye_center(read, matrix), Some([10.0, 20.0, 30.0]));
+
+        let (roots, near, far, patch_near, patch_far) =
+            (0x11_0000, 0x12_0000, 0x13_0000, 0x14_0000, 0x15_0000);
+        words.insert(roots + 0x10, near);
+        words.insert(roots + 0x24, far);
+        words.insert(near + 0x24, patch_near);
+        words.insert(far + 0x24, patch_far);
+        for (patch, x) in [(patch_near, 15.0f32), (patch_far, 500.0)] {
+            for (i, v) in [x, 20.0, 30.0, 1.0].into_iter().enumerate() {
+                words.insert(patch + 0x140 + 4 * i as u32, v.to_bits());
+            }
+        }
+        let nearby = nash_nearby_nodes(
+            |addr| *words.get(&addr).unwrap_or(&0),
+            roots,
+            [10.0, 20.0, 30.0],
+            100.0,
+            None,
+        );
+        assert_eq!(nearby, vec![(25.0, near)]);
+        assert_eq!(
+            nash_world_gaze(
+                |addr| *words.get(&addr).unwrap_or(&0),
+                matrix,
+                [0.0, 0.0, 1.0]
+            ),
+            Some([0.0, 0.0, 1.0])
+        );
+        words.insert(patch_far + 0x140, 6_010.0f32.to_bits());
+        let away = nash_nearby_nodes(
+            |addr| *words.get(&addr).unwrap_or(&0),
+            roots,
+            [10.0, 20.0, 30.0],
+            10_000.0,
+            Some([-1.0, 0.0, 0.0]),
+        );
+        assert_eq!(away, vec![(25.0, near)]);
+        let toward = nash_nearby_nodes(
+            |addr| *words.get(&addr).unwrap_or(&0),
+            roots,
+            [10.0, 20.0, 30.0],
+            10_000.0,
+            Some([1.0, 0.0, 0.0]),
+        );
+        assert_eq!(toward, vec![(25.0, near), (36_000_000.0, far)]);
     }
 }

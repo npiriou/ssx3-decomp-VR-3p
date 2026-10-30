@@ -35,6 +35,31 @@ fn bz_flags(h: vec4<f32>) -> u32 {
         | select(0u, 16u, h.z > a) | select(0u, 32u, h.z < -a);
 }
 
+// The Bezier strip contains triangles outside the game's original view.
+// Reproject a raw VU clip vertex to the tracked eye so entire triangles
+// outside that eye can be rejected before they reach rasterization.
+fn bz_eye_clip(c: u32, h: vec4<f32>) -> vec4<f32> {
+    let gs = fq(c, 4u);
+    let go = fq(c, 5u);
+    let hc = vec4<f32>(h.xyz * gs.xyz + go.xyz * h.w, h.w);
+    let off = fq(c, 28u);
+    let tx = fq(c, 29u);
+    let px = tx.z * (hc.x - off.x * h.w) + tx.w * (1.0 - tx.z) * h.w;
+    let py = hc.y - off.y * h.w;
+    let clip = vec4<f32>(
+        (px + 0.5 * h.w) / b.size.x * 2.0 - h.w,
+        h.w - (py + 0.5 * h.w) / b.size.y * 2.0,
+        h.z, h.w,
+    );
+    return b.vr_reproject * clip;
+}
+
+fn bz_eye_flags(h: vec4<f32>) -> u32 {
+    return select(0u, 1u, h.x > h.w) | select(0u, 2u, h.x < -h.w)
+        | select(0u, 4u, h.y > h.w) | select(0u, 8u, h.y < -h.w)
+        | select(0u, 16u, h.z > h.w) | select(0u, 32u, h.z < -h.w);
+}
+
 fn bz_killed() -> VOut {
     var o: VOut;
     o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
@@ -138,12 +163,22 @@ fn bezier_vertex(vi: u32, c: u32) -> VOut {
     if (!fans) {
         // (The shadow pass draws every strip triangle whole, in or out of
         // the camera's view, and none of the clipped copies below.)
-        if (fa != 0u && !SHADOW_PASS) {
-            return bz_killed();
+        if (!SHADOW_PASS) {
+            if (b.vr_mode != 0u) {
+                let eye_common = bz_eye_flags(bz_eye_clip(c, h0))
+                    & bz_eye_flags(bz_eye_clip(c, h1))
+                    & bz_eye_flags(bz_eye_clip(c, h2));
+                if (eye_common != 0u) { return bz_killed(); }
+            } else if (fa != 0u) {
+                return bz_killed();
+            }
         }
         let h = select(select(h0, h1, r == 1u), h2, r == 2u);
         let v = i - 2u + r;
-        let q = 1.0 / h.w;
+        // STQ must use the eye's perspective divisor after reprojection.
+        // The game's divisor stretches textures across triangles near the
+        // side and rear of the tracked view.
+        let q = 1.0 / select(h.w, bz_eye_clip(c, h).w, b.vr_mode != 0u);
         let uv = bitcast<vec4<f32>>(data[src + 3u * v + 1u]);
         var stq = uv.xyz * q;
         if (info.y != 0u) {
@@ -155,6 +190,9 @@ fn bezier_vertex(vi: u32, c: u32) -> VOut {
         o.nrm = vec4<f32>(bitcast<vec4<f32>>(data[src + 3u * v + 2u]).xyz, 1.0);
         return o;
     }
+    // Fans are duplicates clipped to the game's view; the original strip
+    // above is now clipped to the eye instead.
+    if (b.vr_mode != 0u) { return bz_killed(); }
     let dropped = (fa & 16u) != 0u || (f0 & f1 & f2) != 0u;
     if (fa == 0u || dropped || SHADOW_PASS) {
         return bz_killed();

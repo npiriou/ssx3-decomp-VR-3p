@@ -10,6 +10,9 @@ ash = "0.38.0"
 openxr = { version = "0.22.0", default-features = false, features = ["loaded"] }
 wgpu = "30.0.1"
 
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+
 [[bin]]
 name = "ssx3-vr-probe"
 path = "src/main.rs"

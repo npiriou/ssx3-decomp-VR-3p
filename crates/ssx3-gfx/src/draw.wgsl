@@ -49,6 +49,8 @@ struct Batch {
 @group(0) @binding(3) var dst: texture_2d<f32>;
 @group(0) @binding(4) var zsnap: texture_depth_2d;
 
+fn vr_enabled() -> bool { return b.vr_mode != 0u; }
+
 struct VIn {
     @location(0) pos: vec3<f32>,
     @location(1) fog: f32,

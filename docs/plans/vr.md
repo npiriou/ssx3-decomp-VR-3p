@@ -1,5 +1,9 @@
 # Third-person SteamVR adaptation
 
+The headset prototype exposed gaps in world visibility, UI placement, image
+quality and frame pacing. The current architecture and validation gates are
+in [`vr-redesign.md`](vr-redesign.md).
+
 ## Scope
 
 Adapt the existing native Rust game. Keep the SSX 3 simulation, gameplay

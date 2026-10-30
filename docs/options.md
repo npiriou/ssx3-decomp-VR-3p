@@ -23,6 +23,29 @@ configuration. The plain command above is the recommended way to play.
 | `SSX3_AUDIO=0` | No audio output. |
 | `SSX3_REAL_CLOCK=1` | Give the PS2 the host's date and time (the default is a fixed time, so runs are reproducible). |
 
+**Experimental SteamVR front end** (`ssx3-vr`):
+
+| Variable | Effect |
+| --- | --- |
+| `SSX3_VR_EYE_SIZE=<pixels>` | Internal square eye target, 512–3840. The OpenXR recommended per-eye size is the default; the program logs both sizes. |
+| `SSX3_VR_UNITS_PER_M=<units>` | Game units per physical metre for head position and stereo separation (default 100). |
+| `SSX3_VR_UI_WIDTH_M=<metres>` / `SSX3_VR_UI_HEIGHT_M=<metres>` | Width and height of the race HUD or menu plane (default 1.3 m each). |
+| `SSX3_VR_UI_DISTANCE_M=<metres>` / `SSX3_VR_UI_HEIGHT_OFFSET_M=<metres>` | Distance from the chase camera and vertical offset of the spatial UI (defaults 2 m and 0 m). |
+| `SSX3_BLOOM=original` | Restore the game's full-screen bloom in VR. VR defaults to bloom off to avoid its repeated per-eye copies; the desktop default is unchanged. |
+| `SSX3_VR_MOTION_BLUR=1` | Restore the game's final frame blend in VR. VR normally presents the sharp eye image directly, avoiding a full-screen blend copy for each eye. |
+| `SSX3_VR_VIS_RANGE=<units>` | Maximum radius of the VR course candidate set, 1000–30000 (default 30000). The selection follows the headset and retains nearby objects in every direction. |
+| `SSX3_VR_VIS_STATS=1` | Log VR course-node and object counts every 60 visibility passes. |
+| `SSX3_VR_SKY_FILL=0` | Disable the experimental VR-only extension of the original blue sky dome (for comparing its uncovered horizon). |
+| `SSX3_VR_SKY_SPHERE=1` | Use the continuous blue sky sphere built from the game's polar texture when the Snow Jam panorama is disabled. |
+| `SSX3_VR_SKY_PANORAMA=0` | Disable Snow Jam's VR 360° backdrop (enabled by default for that course). |
+| `SSX3_VR_SKY_RIDGE_PANO=0` | Disable Ruthless Ridge's VR sky backdrop (enabled by default for its matched native sky sequence). |
+| `SSX3_VR_SKY_CITY_PANO=0` | Disable Metro City's VR sky backdrop (enabled by default for its matched native sky sequence). |
+| `SSX3_VR_SKY_WRAP=1` | Enable the earlier experimental Ruthless Ridge sky-panel wrap for comparison; also set `SSX3_VR_SKY_RIDGE_PANO=0`. |
+| `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
+| `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
+
+The current VR path is under redesign; `docs/plans/vr-redesign.md` tracks the remaining coverage and frame-rate gates. Mute game tests with `SSX3_AUDIO=0`.
+
 **Straight into an event** (debugging, testing, benchmarks):
 
 | Variable | Effect |

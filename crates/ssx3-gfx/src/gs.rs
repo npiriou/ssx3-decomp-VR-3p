@@ -116,6 +116,10 @@ pub struct Cam {
 /// What produced a batch: the draw's material, HUD, a post pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tag {
+    /// Source draw's projection record; VR reprojection is per draw.
+    pub matrix: u16,
+    /// Framebuffer copy and other screen-space draws from the flip packet.
+    pub screen: bool,
     /// Bezier terrain (materials `Bezier1`/`Bezier2`).
     pub terrain: bool,
     /// HUD (layers 9 and up).

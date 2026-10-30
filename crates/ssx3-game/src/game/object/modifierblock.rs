@@ -1325,7 +1325,8 @@ pub(crate) mod tests {
 
                 c.g[A0][0] = sky as u64;
                 c.bus.write32(GAME_GP + 0x143c, u32::from(seed % 3 == 0));
-                c.bus.write32(sky + 0x14, if seed % 3 == 1 { 0 } else { node });
+                c.bus
+                    .write32(sky + 0x14, if seed % 3 == 1 { 0 } else { node });
                 c.bus.write32(GAME_GP + 0x2a90, graphics);
                 c.bus.write32(graphics + 0xe84, packet);
                 c.bus.write32(graphics + 0x10d8, vtable);

@@ -31,7 +31,9 @@ fn mat3_mesh_vertex(vi: u32, c: u32) -> VOut {
     let cw = bitcast<vec4<i32>>(rd(base + 2u));
     let p = vec3<f32>(xyz.xyz) / 32768.0;
     let hc = fq(c, 0u) * p.x + fq(c, 1u) * p.y + fq(c, 2u) * p.z + fq(c, 3u);
-    let q = 1.0 / hc.w;
+    let camera_sky = vr_enabled() && uq(c, 4).w == 3u;
+    var q = 1.0;
+    if (!camera_sky) { q = 1.0 / hc.w; }
     let t = vec2<f32>(uv.xy) / 4096.0;
     var col: vec4<f32>;
     if (uq(c, 4).x != 0u) {
@@ -41,8 +43,26 @@ fn mat3_mesh_vertex(vi: u32, c: u32) -> VOut {
     }
     let g = fq(c, 18u);
     let cz = (hc.z - g.y * hc.w) / g.x;
-    var o = gs_vertex(c, hc, cz, rd(base + 3u).x != 0u, col, vec3<f32>(t * q, q));
-    if (uq(c, 4).w == 0u && !SHADOW_PASS) {
+    var stq = vec3<f32>(t * q, q);
+    // Synthetic VR sky meshes wrap behind the original chase camera. Their
+    // source w crosses zero at its old image plane, so the GS's pre-divided
+    // STQ becomes singular there. These meshes use linear UVs instead.
+    if (vr_enabled() && (uq(c, 4).w == 2u || camera_sky)) {
+        stq = vec3<f32>(t, 1.0);
+    }
+    var o = gs_vertex(c, hc, cz, rd(base + 3u).x != 0u, col, stq);
+    if (camera_sky) {
+        // The synthetic panorama's q0-3 are the game's projection, and its
+        // vertices are in camera space. Reproject them directly into this
+        // tracked eye instead of passing through the PS2 sky screen matrix.
+        let eye_clip = b.vr_reproject * hc;
+        o.pos = vec4<f32>(eye_clip.xy, 0.5 * (eye_clip.w - eye_clip.z), eye_clip.w);
+        o.zw = vec2<f32>(eye_clip.z, eye_clip.w);
+        let tex_scale = fq(c, 29u);
+        let eye_q = 1.0 / eye_clip.w;
+        o.stq = vec3<f32>(t.x * tex_scale.x * eye_q, t.y * tex_scale.y * eye_q, eye_q);
+    }
+    if (uq(c, 4).w == 0u && !SHADOW_PASS && !vr_enabled()) {
         // A mesh without the clip flag: the program draws its projection
         // as is (a vertex behind the eye too, mirrored by the divide), and
         // the GS only scissors. So no clipping here: the screen position.
