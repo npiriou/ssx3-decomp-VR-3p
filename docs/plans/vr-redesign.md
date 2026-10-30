@@ -431,6 +431,29 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   `SSX3_VR_TEXTURES=0` disables the built-in replacement. Other close objects
   still use their native textures.
 
+### Gravitude side-view diagnosis (2026-10-31)
+
+A muted live-game capture at frame 650 with a 90-degree head turn shows a
+flat-edged dark cliff, a nearly uniform purple sky, and a dark blue foreground.
+Pixel probes of its stereo frame dump put the foreground in the Bezier terrain
+path: draw 175 first writes a light base texture, then the game's subtractive
+baked-colour pass darkens it. A pixel on the cliff/sky region is covered by
+Mat3 mesh draws 198/200. Dropping draw 198 in a replay reveals the underlying
+sky gradient, but leaves the cliff and foreground visibly coarse; suppressing
+that draw is therefore no solution. The defect spans the native world meshes,
+terrain colour pass, and the source assets rather than the snow tile alone.
+
+Three texture/refinement trials were rejected. Increasing the optional Bezier
+terrain refinement from threshold 10 to 1 barely changed the side image and
+exhausted its triangle budget. A generated opaque snow replacement lost the
+original tile's variable alpha and made the blend harsher. A procedural
+detail version that preserved alpha had little visible benefit and dropped
+the live 1920-square offline fresh-stereo rate from about 59.8 to 57.4-59.0/s
+across adjacent runs. No trial was installed. The next G1 work should identify
+the offending Mat3 mesh and its original texture, then compare its geometry,
+material and colour against the game's normal forward view before changing
+the VR renderer. G3 still requires a live OpenXR pacing measurement.
+
 Keep headset review behind the remaining G1 coverage and G3 pacing work.
 All game captures in this investigation used `SSX3_AUDIO=0`.
 
