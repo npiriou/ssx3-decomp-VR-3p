@@ -239,6 +239,8 @@ pub struct Shared {
     /// (frames counted as `render_built` receives them).
     depth: Mutex<Option<(u64, ssx3_ps2::frame_sink::Depth)>>,
     depth_ready: std::sync::Condvar,
+    /// One past the newest rendered VR menu frame, which has no world depth.
+    depthless_through: std::sync::atomic::AtomicU64,
     /// The latest frame's images (in-between ones first) and when they
     /// were ready.
     present: Mutex<Option<(Vec<wgpu::Texture>, web_time::Instant)>>,
@@ -622,6 +624,11 @@ impl Renderer {
         self.0.lock().unwrap().stats
     }
 
+    /// Mean render-stage timings of frames completed by the worker.
+    pub fn timing_report(&self) -> String {
+        self.0.lock().unwrap().timing_report()
+    }
+
     /// Primitives drawn into other frame buffers (debug).
     pub fn dropped_fbp(&self) -> Vec<((u32, u32, u32), u64)> {
         let mut v: Vec<_> = self
@@ -679,6 +686,14 @@ impl ssx3_ps2::frame_sink::FrameSink for Renderer {
                 Some((f, _)) if *f == frame => return g.take().map(|d| d.1),
                 Some((f, _)) if *f > frame => return g.take().map(|d| d.1),
                 _ => {}
+            }
+            if self
+                .1
+                .depthless_through
+                .load(std::sync::atomic::Ordering::Acquire)
+                > frame
+            {
+                return None;
             }
             let now = web_time::Instant::now();
             if now >= deadline {
@@ -1229,6 +1244,13 @@ impl Inner {
             std::mem::swap(&mut self.targets, &mut self.ui_targets);
             self.vr_ui = false;
             self.vr_menu = false;
+            // A menu card has no world Z buffer. Publish that fact with
+            // this frame's index so the game does not wait 100 ms for one.
+            let _depth = self.shared.depth.lock().unwrap();
+            self.shared
+                .depthless_through
+                .store(self.frames_in, std::sync::atomic::Ordering::Release);
+            self.shared.depth_ready.notify_all();
             return queue;
         }
         self.ui_present = None;

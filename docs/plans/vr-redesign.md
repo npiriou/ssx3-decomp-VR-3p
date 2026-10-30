@@ -5,6 +5,17 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
 
 ## Measured implementation status (2026-10-30)
 
+- Menu frames now publish that they have no world depth. The game's
+  frame-indexed depth query previously waited 100 ms for every VR menu
+  frame, even though its UI render took under 1 ms. A muted 1920-square
+  offline menu run now reaches 60.0 game ticks/s through frame 500, versus
+  12.3/s before the fix. Its centered menu card is nonblank in both eyes;
+  no perspective world image is fabricated behind it. In a muted Gravitude
+  run at the same eye size, frames 420–501 measured 60.3 game ticks/s,
+  71.4 stereo submissions/s and 59.5 fresh stereo images/s. A simulated
+  90° turn kept the rendered eye pose aligned with the requested pose and
+  the final eyes distinct. These are offline results; SteamVR headset
+  pacing and comfort still need validation.
 - The VR executable now uses OpenXR's recommended eye extent by default
   (1920 × 1920 on the local PICO), with no automatic descent to 512. It logs
   per-stage p50/p95/max timing windows. These new counters still need a live

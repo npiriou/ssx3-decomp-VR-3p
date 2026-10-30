@@ -335,6 +335,18 @@ fn vr_panel_config(units_per_metre: f32) -> xr_wgpu_session::PanelConfig {
     }
 }
 
+fn panel_eyes(eyes: [ssx3_gfx::vr::Eye; 2]) -> [xr_wgpu_session::PanelEye; 2] {
+    eyes.map(|eye| xr_wgpu_session::PanelEye {
+        game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game).unwrap_or(ssx3_gfx::vr::IDENTITY),
+        clip: [
+            eye.projection[0][0],
+            eye.projection[1][1],
+            eye.projection[2][0],
+            eye.projection[2][1],
+        ],
+    })
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     configure_vr_game();
     let entry = ssx3_vr::load_entry()?;
@@ -532,17 +544,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                     let stereo = gfx.present_stereo_views();
                     let sources = stereo.as_ref().map(|s| [&s[0].0, &s[1].0]);
                     presented_world = stereo.is_some();
-                    let panel_eyes = eyes.map(|eye| xr_wgpu_session::PanelEye {
-                        game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game)
-                            .unwrap_or(ssx3_gfx::vr::IDENTITY),
-                        clip: [
-                            eye.projection[0][0],
-                            eye.projection[1][1],
-                            eye.projection[2][0],
-                            eye.projection[2][1],
-                        ],
-                    });
-                    let timing = target.blit_stereo(&graphics, sources, &hud, panel_eyes, panel)?;
+                    let timing =
+                        target.blit_stereo(&graphics, sources, &hud, panel_eyes(eyes), panel)?;
                     submitted_fresh_stereo = stereo.is_some() && serial != last_present_serial;
                     stages.push(4, timing.acquire_wait_ms);
                     stages.push(5, timing.encode_submit_ms);
@@ -734,36 +737,23 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             let serial = gfx.present_serial();
             let stereo = gfx.present_stereo_views();
             let hud = gfx.present_vr_ui_view();
-            if let (Some(stereo), Some(hud)) = (stereo.as_ref(), hud.as_ref()) {
+            if let Some(hud) = hud.as_ref() {
                 let rendered_eyes = gfx.present_vr_eyes();
-                if game_frame >= 420 {
+                if game_frame >= 420 && stereo.is_some() {
                     if let Some(drawn) = rendered_eyes {
                         pose_errors.push(vr_camera::rotation_delta_deg(eyes[0], drawn[0]));
                     }
                 }
-                let panel_eyes =
-                    rendered_eyes
-                        .unwrap_or(eyes)
-                        .map(|eye| xr_wgpu_session::PanelEye {
-                            game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game)
-                                .unwrap_or(ssx3_gfx::vr::IDENTITY),
-                            clip: [
-                                eye.projection[0][0],
-                                eye.projection[1][1],
-                                eye.projection[2][0],
-                                eye.projection[2][1],
-                            ],
-                        });
                 gpu_wait_ms += compositor.blit_stereo(
                     &gpu.device,
                     &gpu.queue,
-                    [&stereo[0].0, &stereo[1].0],
+                    stereo.as_ref().map(|s| [&s[0].0, &s[1].0]),
                     hud,
-                    panel_eyes,
+                    panel_eyes(rendered_eyes.unwrap_or(eyes)),
                     panel,
                 )?;
                 submitted += 1;
-                fresh += u64::from(serial != last_serial);
+                fresh += u64::from(stereo.is_some() && serial != last_serial);
                 last_serial = serial;
             } else {
                 let t = Instant::now();
@@ -796,9 +786,12 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     let frames = worker.progress.frames.load(Ordering::Acquire);
     let elapsed = started.elapsed().as_secs_f64();
     let images = gfx.stats().frames;
+    let game_ms = worker.progress.tick_us.load(Ordering::Relaxed) as f64 / 1000.0;
+    let status = worker.progress.status.lock().unwrap().clone();
     println!(
-        "offline VR pipeline: game {frames} ticks ({:.1}/s), renderer {images} frames, presented {submitted} stereo ({:.1}/s), fresh {fresh} ({:.1}/s), {}x{} per eye, {:.2}s; refresh {refreshes} ({:.1}ms total), lock {:.1}ms, GPU wait {:.1}ms, pending max {pending_max}",
+        "offline VR pipeline: game {frames} ticks ({:.1}/s, {:.1}ms CPU/tick), renderer {images} frames, presented {submitted} stereo ({:.1}/s), fresh {fresh} ({:.1}/s), {}x{} per eye, {:.2}s; refresh {refreshes} ({:.1}ms total), lock {:.1}ms, GPU wait {:.1}ms, pending max {pending_max}, status {status:?}",
         frames as f64 / elapsed,
+        game_ms / frames.max(1) as f64,
         submitted as f64 / elapsed,
         fresh as f64 / elapsed,
         eye_size,
@@ -811,7 +804,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     if let Some((at, first, shown, new, views, locked, waited)) = race_mark {
         let seconds = at.elapsed().as_secs_f64().max(1e-6);
         println!(
-            "offline race frames {first}..{frames}: game {:.1}/s, stereo {:.1}/s, fresh {:.1}/s, refresh {}, lock {:.1}ms, GPU wait {:.1}ms",
+            "offline frames {first}..{frames}: game {:.1}/s, stereo {:.1}/s, fresh {:.1}/s, refresh {}, lock {:.1}ms, GPU wait {:.1}ms",
             (frames - first) as f64 / seconds,
             (submitted - shown) as f64 / seconds,
             (fresh - new) as f64 / seconds,
@@ -820,6 +813,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             gpu_wait_ms - waited,
         );
     }
+    println!("offline renderer: {}", gfx.timing_report());
     if !pose_errors.is_empty() {
         pose_errors.sort_by(f32::total_cmp);
         let count = pose_errors.len();
@@ -865,22 +859,12 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         }
         let stereo = gfx.present_stereo_views().ok_or("No final stereo views")?;
         let hud = gfx.present_vr_ui_view().ok_or("No final spatial HUD")?;
-        let panel_eyes = eyes.map(|eye| xr_wgpu_session::PanelEye {
-            game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game)
-                .unwrap_or(ssx3_gfx::vr::IDENTITY),
-            clip: [
-                eye.projection[0][0],
-                eye.projection[1][1],
-                eye.projection[2][0],
-                eye.projection[2][1],
-            ],
-        });
         compositor.blit_stereo(
             &gpu.device,
             &gpu.queue,
-            [&stereo[0].0, &stereo[1].0],
+            Some([&stereo[0].0, &stereo[1].0]),
             &hud,
-            panel_eyes,
+            panel_eyes(eyes),
             panel,
         )?;
         let [left_eye, right_eye] = compositor.read_eyes(&gpu.device, &gpu.queue)?;
@@ -910,6 +894,39 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         if left < total * 9 / 10 || right < total * 9 / 10 || different < total / 20 {
             return Err("Offline compositor produced an empty or duplicated eye".into());
         }
+    } else if let Some(prefix) = std::env::var_os("SSX3_VR_OFFLINE_SAVE") {
+        let hud = gfx.present_vr_ui_view().ok_or("No final spatial UI")?;
+        let stereo = gfx.present_stereo_views();
+        compositor.blit_stereo(
+            &gpu.device,
+            &gpu.queue,
+            stereo.as_ref().map(|s| [&s[0].0, &s[1].0]),
+            &hud,
+            panel_eyes(gfx.present_vr_eyes().unwrap_or(eyes)),
+            panel,
+        )?;
+        let [left, right] = compositor.read_eyes(&gpu.device, &gpu.queue)?;
+        let nonblack = |pixels: &[u32]| pixels.iter().filter(|&&p| p & 0x00ff_ffff != 0).count();
+        println!(
+            "offline final card: world {}, left nonblack {}/{}, right nonblack {}/{}",
+            stereo.is_some(),
+            nonblack(&left.2),
+            left.2.len(),
+            nonblack(&right.2),
+            right.2.len(),
+        );
+        if nonblack(&left.2) == 0 || nonblack(&right.2) == 0 {
+            return Err("Offline final UI is blank in an eye".into());
+        }
+        let prefix = prefix.to_string_lossy();
+        std::fs::write(
+            format!("{prefix}-left.png"),
+            png::encode(left.0, left.1, &left.2),
+        )?;
+        std::fs::write(
+            format!("{prefix}-right.png"),
+            png::encode(right.0, right.1, &right.2),
+        )?;
     }
     Ok(())
 }

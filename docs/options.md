@@ -32,9 +32,10 @@ Set `SSX3_VR_OFFLINE_TURN_AT=450` and optionally
 `SSX3_VR_OFFLINE_TURN_DEG=90` to simulate a head turn during that run.
 `SSX3_VR_OFFLINE_SWEEP_DPS=<degrees/s>` makes that turn continuous and
 reports the angular gap between the requested and rendered eye pose.
-Set `SSX3_VR_OFFLINE_SAVE=<prefix>` with a turn to save the final composited
+Set `SSX3_VR_OFFLINE_SAVE=<prefix>` to save the final composited
 `<prefix>-left.png` and `<prefix>-right.png` for visual review. The offline
-mode uses the same UI dimensions and world-unit setting as the live VR mode.
+mode can also capture a menu card without `SSX3_EVENT` or a simulated turn.
+It uses the same UI dimensions and world-unit setting as the live VR mode.
 The test runs the live two-eye world/HUD composition shader and waits for
 its GPU work. It excludes OpenXR swapchain and headset compositor time.
 
