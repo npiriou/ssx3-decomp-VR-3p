@@ -59,6 +59,7 @@ its GPU work. It excludes OpenXR swapchain and headset compositor time.
 | `SSX3_VR_SKY_WRAP=1` | Enable the earlier experimental Ruthless Ridge sky-panel wrap for comparison; also set `SSX3_VR_SKY_RIDGE_PANO=0`. |
 | `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
 | `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
+| `SSX3_VR_INSPECT_DRAW=<index>` | With `gfx_replay`, log a frame draw's material, texture IDs and VU/DIRECT calls; use with `SSX3_GFX_PROBE=x,y` to trace a pixel back to its draw and GPU call. |
 
 The current VR path is under redesign; `docs/plans/vr-redesign.md` tracks the remaining coverage and frame-rate gates. Mute game tests with `SSX3_AUDIO=0`.
 

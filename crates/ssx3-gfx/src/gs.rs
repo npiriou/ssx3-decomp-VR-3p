@@ -118,6 +118,8 @@ pub struct Cam {
 pub struct Tag {
     /// Source draw's projection record; VR reprojection is per draw.
     pub matrix: u16,
+    /// Source draw index for the pixel probe (zero during normal rendering).
+    pub probe_draw: u16,
     /// Framebuffer copy and other screen-space draws from the flip packet.
     pub screen: bool,
     /// Bezier terrain (materials `Bezier1`/`Bezier2`).
@@ -1228,6 +1230,7 @@ impl Gs {
                         pass2,
                         ..self.tag
                     }
+                && self.tag.probe_draw == 0
                 && g.program == gb.program
                 && g.first + g.count == gb.first =>
             {

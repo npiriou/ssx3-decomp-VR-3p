@@ -161,6 +161,49 @@ fn main() {
                     }
                 }
             }
+            if i + 1 == frames.len() && rep == 0 {
+                if let Some(index) = std::env::var("SSX3_VR_INSPECT_DRAW")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    if let Some(draw) = built.frame.draws().nth(index) {
+                        let calls: Vec<_> = built
+                            .events
+                            .iter()
+                            .filter_map(|(owner, event)| {
+                                matches!(owner, ssx3_render::frame::Owner::Payload(n) if *n == index)
+                                    .then_some(event)
+                            })
+                            .filter_map(|event| match event {
+                                ssx3_render::vif::Event::Call(call) => {
+                                    Some((call.entry, call.native, call.input.len()))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        eprintln!(
+                            "[vr-draw] {index}: {:?} layer {} matrix {} tex {:?} calls {:?}",
+                            draw.state.material, draw.state.layer, draw.matrix, draw.tex, calls
+                        );
+                        for (owner, event) in &built.events {
+                            if matches!(owner, ssx3_render::frame::Owner::Payload(n) if *n == index)
+                            {
+                                match event {
+                                    ssx3_render::vif::Event::Direct(direct) => eprintln!(
+                                        "[vr-draw] direct {} qwords native {}",
+                                        direct.qwords.len(),
+                                        direct.native
+                                    ),
+                                    ssx3_render::vif::Event::Native { index, .. } => {
+                                        eprintln!("[vr-draw] native packet {index}")
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // SSX3_VIF_STATS: decoded (not replayed) VU input qwords per
             // material and calls.
             if std::env::var_os("SSX3_VIF_STATS").is_some() {

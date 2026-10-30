@@ -2119,9 +2119,17 @@ impl Inner {
                     0,
                 );
                 let desc = if probe.is_some() {
+                    let gpu_call = b.gpu.map(|g| g.call);
+                    let bezier_verts = b.gpu.and_then(|g| {
+                        (g.program == ssx3_render::gpu::Program::Bezier)
+                            .then(|| 1 + g.call as usize * 5 + 3)
+                            .and_then(|slot| self.gs.gpu.call_start.get(slot))
+                            .and_then(|&start| self.gs.gpu.calls.get(start as usize + 4 + 7))
+                            .map(|info| info[2])
+                    });
                     format!(
-                        "prim {:#x} tex {:x?} tex0 {:#x} alpha {:#x} test {:#x} fba {} frame {:#x} flags {:#x} src_mode {} key {:?}",
-                        st.prim, st.tex, st.ctx.tex0, st.ctx.alpha, st.ctx.test, st.ctx.fba, st.ctx.frame, p.u.flags, p.u.src_mode, p.key
+                        "prim {:#x} tex {:x?} tex0 {:#x} alpha {:#x} test {:#x} fba {} frame {:#x} flags {:#x} src_mode {} terrain {} pass2 {} matrix {} draw {} gpu {:?} call {:?} verts {:?} key {:?}",
+                        st.prim, st.tex, st.ctx.tex0, st.ctx.alpha, st.ctx.test, st.ctx.fba, st.ctx.frame, p.u.flags, p.u.src_mode, b.tag.terrain, b.tag.pass2, b.tag.matrix, b.tag.probe_draw, b.gpu.map(|g| g.program), gpu_call, bezier_verts, p.key
                     )
                 } else {
                     String::new()
@@ -3515,6 +3523,7 @@ impl Build {
                 let m = n.and_then(|n| draws.get(n)).map(|d| d.state.material);
                 b.gs.tag = gs::Tag {
                     matrix: n.and_then(|n| draws.get(n)).map_or(0, |d| d.matrix as u16),
+                    probe_draw: n.filter(|_| dbg.probe.is_some()).map_or(0, |n| n as u16),
                     terrain: matches!(m, Some(Material::Bezier1 | Material::Bezier2)),
                     ..Default::default()
                 };

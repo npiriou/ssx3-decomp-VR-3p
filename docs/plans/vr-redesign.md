@@ -178,16 +178,31 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   RGB levels per channel across the image and did not improve the large
   faceted wall. This tile set is **not** in the local VR pack. VIF call
   counts on that frame show 261 Bezier1 patches using the 4×4 grid,
-  75 using 6×6 and only three using 8×8. The close-wall problem needs a
-  terrain geometry/LOD design, not a blanket texture upscaling pass.
+  75 using 6×6 and only three using 8×8. Blanket texture upscaling did not
+  solve the close-wall problem; its geometry and material need separate
+  treatment.
   The game-side LOD table returns 4, 6 or 8 points per patch edge. An
   experimental VR minimum of 6 changed only 50,396 of 3,686,400 pixels
   in the frame-1000 side view, leaving the wall's silhouette unchanged.
   Forcing 8 opened obvious gaps and dropped the renderer's average draw
   count from 872 to 353; its faster frame time was caused by missing
-  terrain. Both LOD overrides were removed. A future VR terrain path must
-  tessellate from the patch's source data on the renderer side and match
+  terrain. Both LOD overrides were removed. If VR terrain is tessellated
+  further, it must use source patch data on the renderer side and match
   shared edge samples, while leaving the game's LOD output intact.
+- A pixel probe on Gravitude frame 1000's +90° view (512-square pixel
+  400,240) identified the close wall as Bezier1 draw 237, not a sky panel.
+  Its affecting GPU calls use a 6×6 grid (60 strip vertices): the first
+  terrain pass samples texture `3b48244bfb79ebcb` (128×128 snow) and the
+  next subtractive material pass samples `c4594029cf69c017` (128×128
+  baked colour). The earlier 17-tile trial did not include either source.
+  A 4× restoration of the snow tile made the repeated striations harsher;
+  restoring the baked tile produced large diagonal colour blocks. Blurring
+  that baked layer also exposed broad patch boundaries. None of these
+  variants entered the local pack. `SSX3_GFX_PROBE` now reports the source
+  draw and GPU call; `SSX3_VR_INSPECT_DRAW=<index>` reports its material,
+  texture IDs and VU calls. A `SSX3_GFX_SKIP` search pointed at draw 42,
+  but that draw is a five-qword DIRECT state packet, so skipping it is not
+  valid visual attribution.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it
