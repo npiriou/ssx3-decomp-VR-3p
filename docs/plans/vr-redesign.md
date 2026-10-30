@@ -608,6 +608,23 @@ it disabled. The small difference is within run variation; headset pacing
 remains unverified. `SSX3_VR_SKY_GRAVITUDE_HORIZON=0` restores the previous
 hard border. Close course walls still need a separate geometry/material fix.
 
+### Snow Jam polar sky streak (2026-10-31)
+
+The original 256-square polar sky texture contains a pale diagonal mark
+through its centre. The complete VR sky sampled across that centre and
+enlarged the mark into a bright streak in the 180-degree rear view. Snow Jam
+now samples an intact blue/cloud region of that same original texture for its
+VR dome. This is enabled only for its validated seven-texture panorama;
+`SSX3_VR_SKY_POLAR_CLEAN=0` restores the previous UVs. Frozen rear captures
+at frames 500, 1000 and 1500 show no streak. At frame 1500, the 1920-square
+rear eyes each have all 3,686,400 pixels nonblack and differ at 3,102,443
+pixels. The lower 324 rows of the 1024-square rear view are pixel-identical
+to the old path, so this change did not alter the visible course. Forward
+and side stereo captures are filled and distinct. Frame 1000 still shows
+small detached geometry near the rear horizon; G1 remains open. Live headset
+quality and sustained pacing are unverified. A 512-square desktop frame is
+byte-identical with the switch on and off.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

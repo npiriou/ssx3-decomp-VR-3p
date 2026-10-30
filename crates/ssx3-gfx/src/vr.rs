@@ -179,6 +179,7 @@ pub fn sky_dome_lower_band(
 /// This replaces the four coarse native dome meshes for tracked views.
 pub fn sky_dome_background(
     calls: &[ssx3_render::gpu::GpuCall],
+    clean_polar: bool,
 ) -> Option<ssx3_render::gpu::GpuCall> {
     use ssx3_render::gpu::{Link, Program};
     let base = calls.first()?;
@@ -238,9 +239,18 @@ pub fn sky_dome_background(
             }
             // The native outer ring contains a sharp circular transition
             // that becomes a giant polygon in a wide tracked view. Sample
-            // the original texture's central blue/cloud region instead.
-            v[1][0] = ((0.5 + 0.32 * x) * 4096.0).round().clamp(0.0, 4095.0) as u32;
-            v[1][1] = ((0.5 - 0.32 * y) * 4096.0).round().clamp(0.0, 4095.0) as u32;
+            // the original texture's interior blue/cloud region instead.
+            let (u, tex_v) = if clean_polar {
+                // The source polar map has a thin diagonal pale line across
+                // its centre. A complete VR sky enlarges that mark into a
+                // bright streak behind the rider. Sample its intact upper
+                // blue/cloud region while keeping the original texture.
+                (0.5 + 0.20 * x, 0.25 - 0.16 * y)
+            } else {
+                (0.5 + 0.32 * x, 0.5 - 0.32 * y)
+            };
+            v[1][0] = (u * 4096.0).round().clamp(0.0, 4095.0) as u32;
+            v[1][1] = (tex_v * 4096.0).round().clamp(0.0, 4095.0) as u32;
             out.data.extend_from_slice(&v);
         }
     }

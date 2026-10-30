@@ -3766,6 +3766,8 @@ impl Build {
         let panorama_sky = vr_sky_dome
             && supported_panorama_sky
             && std::env::var("SSX3_VR_SKY_PANORAMA").map_or(true, |v| v != "0");
+        let clean_snow_polar =
+            panorama_sky && std::env::var("SSX3_VR_SKY_POLAR_CLEAN").map_or(true, |v| v != "0");
         let supported_ridge_sky = vr_sky_dome
             && sky_draws >= 7
             && [508, 516, 515, 514, 509, 513, 512]
@@ -4265,12 +4267,14 @@ impl Build {
                         || gravitude_panorama
                         || wrapped_sky
                     {
-                        if let Some(sphere) = vr::sky_dome_background(&sky_dome_calls) {
+                        if let Some(sphere) =
+                            vr::sky_dome_background(&sky_dome_calls, clean_snow_polar)
+                        {
                             b.gs.gpu_draw(sphere);
                         }
                         true
                     } else if sphere_sky {
-                        if let Some(sphere) = vr::sky_dome_background(&sky_dome_calls) {
+                        if let Some(sphere) = vr::sky_dome_background(&sky_dome_calls, false) {
                             b.gs.gpu_draw(sphere);
                             true
                         } else {
