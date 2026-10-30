@@ -3871,6 +3871,12 @@ impl Build {
                                                             )
                                                             .as_deref()
                                                                 != Ok("0"),
+                                                        gravitude_panorama
+                                                            && std::env::var(
+                                                                "SSX3_VR_SKY_GRAVITUDE_HORIZON",
+                                                            )
+                                                            .as_deref()
+                                                                != Ok("0"),
                                                     )
                                                 } else {
                                                     vr::sky_panorama_panels(&c, matrix.view_proj)

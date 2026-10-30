@@ -424,6 +424,7 @@ pub fn sky_native_panorama_panels(
     gs_size: (u32, u32),
     fade_upper_edge: bool,
     join_gravitude_upper: bool,
+    blend_gravitude_horizon: bool,
 ) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
     use ssx3_render::gpu::{Link, Program};
     if call.program != Program::Mat3Mesh
@@ -479,9 +480,21 @@ pub fn sky_native_panorama_panels(
     };
     let keep_start = smooth_gravitude && shared_edge(start);
     let keep_end = smooth_gravitude && shared_edge(end);
+    let blend_horizon =
+        join_gravitude_upper && blend_gravitude_horizon && (shared_edge(start) || shared_edge(end));
+    // Put the lower source behind the last two rows of the upper source.
+    // Its full V range is mapped across the extended height; repeating one
+    // edge texel here produces long vertical streaks in the mountains.
+    const OVERLAP_ROWS: u32 = 2;
+    let extra_top = if blend_horizon && !upper {
+        OVERLAP_ROWS
+    } else {
+        0
+    };
+    let rows = VERTICAL + extra_top;
     let template = call.data.chunks_exact(4).next()?;
-    for row in 0..=VERTICAL {
-        let t = row as f32 / VERTICAL as f32;
+    for row in 0..=rows {
+        let t = (row as i32 - extra_top as i32) as f32 / VERTICAL as f32;
         let (radius, height) = if upper {
             (0.634, 0.392 - 0.784 * t)
         } else if t <= 0.5 {
@@ -497,12 +510,22 @@ pub fn sky_native_panorama_panels(
                 vertex[0][lane] = ((p * 32768.0).round() as i32) as u32;
             }
             vertex[1][0] = ((1.0 - s) * 4096.0).round() as u32;
-            vertex[1][1] = (t * 4096.0).round() as u32;
+            let tex_v = if extra_top != 0 {
+                (t + OVERLAP_ROWS as f32 / VERTICAL as f32)
+                    / (1.0 + OVERLAP_ROWS as f32 / VERTICAL as f32)
+            } else {
+                t
+            };
+            vertex[1][1] = (tex_v * 4096.0).round() as u32;
             let edge = (if keep_start { 1.0 } else { s / 0.25 })
                 .min(if keep_end { 1.0 } else { (1.0 - s) / 0.25 })
                 .clamp(0.0, 1.0);
             let vertical = if upper {
-                1.0
+                if blend_horizon {
+                    ((1.0 - t) * VERTICAL as f32 / OVERLAP_ROWS as f32).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
             } else if fade_upper_edge {
                 (t / 0.125).min((1.0 - t) / 0.25).clamp(0.0, 1.0)
             } else {
@@ -512,7 +535,7 @@ pub fn sky_native_panorama_panels(
             out.data.extend_from_slice(&vertex);
         }
     }
-    for row in 0..VERTICAL {
+    for row in 0..rows {
         for col in 0..HORIZONTAL {
             let a = row * (HORIZONTAL + 1) + col;
             let b = a + 1;
@@ -872,8 +895,9 @@ mod tests {
         }
         call.uniforms[4][1] = 6;
         let p = projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
-        let panels = sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), true, false)
-            .expect("Ruthless Ridge peak strip");
+        let panels =
+            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), true, false, false)
+                .expect("Ruthless Ridge peak strip");
         assert_eq!(panels.len(), 1);
         let panel = &panels[0];
         assert_eq!(panel.uniforms[4][1], 17 * 9);
@@ -889,10 +913,15 @@ mod tests {
         // Keep their artwork opaque there; an unpaired outer edge must
         // still fade into the blue dome instead of exposing a hard wedge.
         let joined_upper =
-            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), false, true)
+            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), false, true, false)
                 .expect("joined upper sector");
         assert_eq!(joined_upper[0].data[2][3], 128);
         assert_eq!(joined_upper[0].data[8 * 4 + 2][3], 128);
+        let crossfade_upper =
+            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), false, true, true)
+                .expect("crossfaded upper sector");
+        assert_eq!(crossfade_upper[0].data[14 * 9 * 4 + 2][3], 128);
+        assert_eq!(crossfade_upper[0].data[16 * 9 * 4 + 2][3], 0);
         let mut outer = call.clone();
         for vertex in outer.data.chunks_exact_mut(4) {
             let x = vertex[0][0] as i32 as f32 / 32768.0;
@@ -901,8 +930,9 @@ mod tests {
             vertex[0][0] = (((c * x + s * y) * 32768.0).round() as i32) as u32;
             vertex[0][1] = (((-s * x + c * y) * 32768.0).round() as i32) as u32;
         }
-        let outer = sky_native_panorama_panels(&outer, p, [0.0, 0.0], (1024, 1024), false, true)
-            .expect("outer upper sector");
+        let outer =
+            sky_native_panorama_panels(&outer, p, [0.0, 0.0], (1024, 1024), false, true, false)
+                .expect("outer upper sector");
         assert_eq!(outer[0].data[2][3], 0);
         assert_eq!(outer[0].data[8 * 4 + 2][3], 128);
         for (source, wrapped) in [(1, 0), (0, bottom_left)] {
@@ -942,11 +972,20 @@ mod tests {
             }
         }
         lower.uniforms[4][1] = 15;
-        let faded = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), true, false)
-            .expect("lower sector");
-        let joined = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false, false)
-            .expect("joined lower sector");
+        let faded =
+            sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), true, false, false)
+                .expect("lower sector");
+        let joined =
+            sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false, false, false)
+                .expect("joined lower sector");
         assert_eq!(faded[0].data[4 * 4 + 2][3], 0);
         assert_eq!(joined[0].data[4 * 4 + 2][3], 128);
+        let crossfade_lower =
+            sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false, true, true)
+                .expect("crossfaded lower sector");
+        assert_eq!(crossfade_lower[0].uniforms[4][1], 19 * 9);
+        assert_eq!(crossfade_lower[0].data[1][1], 0);
+        assert!(crossfade_lower[0].data[2 * 9 * 4 + 1][1] > 0);
+        assert_eq!(crossfade_lower[0].data[18 * 9 * 4 + 1][1], 4096);
     }
 }

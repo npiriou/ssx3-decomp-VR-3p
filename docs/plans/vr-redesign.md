@@ -505,6 +505,25 @@ The lower/upper artwork still has a horizontal transition and the side course
 wall remains coarse; G1 is open. `SSX3_VR_SKY_GRAVITUDE_SMOOTH=0` restores
 the former fade.
 
+The remaining horizontal transition was probed on frozen frame 650: upper
+Mat3 sky draw 7 supplies a pixel just above it, while lower Mat3 sky draw 4
+supplies the pixel below. Their sampled colours differ before post effects.
+An opt-in trial extended the upper strip below its native boundary and faded
+its alpha while clamping its last texture row. It removed the hard edge but
+stretched that row into conspicuous vertical streaks across the mountains.
+That trial was reverted. The installed path instead extends the lower strip
+two mesh rows upward, maps its whole source texture across the new height, and
+fades the upper strip through those same rows. The two original images blend
+without clamping an edge texel. Frozen Gravitude stereo captures at frames
+650, 1000 and 1500 show the hard horizontal band gone in the forward view;
+both 1920-square eyes at frames 650 and 1000 remain filled and distinct. The
+frame-650 side images are byte-identical to the prior path in both eyes. In
+adjacent muted 650-tick offline runs at 1920 square per eye, race frames
+420-651 measured 59.7 fresh stereo images/s with the blend and 60.0/s with
+it disabled. The small difference is within run variation; headset pacing
+remains unverified. `SSX3_VR_SKY_GRAVITUDE_HORIZON=0` restores the previous
+hard border. Close course walls still need a separate geometry/material fix.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

@@ -153,6 +153,9 @@ use. `SSX3_VR_PRELOAD_TEXTURES=0` restores first-use loading for comparison.
 Gravitude's upper sky sectors now keep their shared borders filled, removing
 the dark vertical gap in the forward view. `SSX3_VR_SKY_GRAVITUDE_SMOOTH=0`
 restores the old edge fade for comparison.
+The upper/lower Gravitude sky panels now overlap briefly so their original
+mountain images blend instead of forming a horizontal band;
+`SSX3_VR_SKY_GRAVITUDE_HORIZON=0` restores the old border.
 
 Alpha in the PNGs is the GS's doubled (255 = opaque). Render targets, the frame-feedback
 passes and movie frames are not textures and are not dumped. `textures/` is ignored by git
