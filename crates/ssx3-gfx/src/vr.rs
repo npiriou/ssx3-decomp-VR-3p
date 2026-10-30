@@ -422,6 +422,7 @@ pub fn sky_native_panorama_panels(
     game_projection: [[f32; 4]; 4],
     xyoffset: [f32; 2],
     gs_size: (u32, u32),
+    fade_upper_edge: bool,
 ) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
     use ssx3_render::gpu::{Link, Program};
     if call.program != Program::Mat3Mesh
@@ -487,8 +488,10 @@ pub fn sky_native_panorama_panels(
             let edge = (s / 0.25).min((1.0 - s) / 0.25).clamp(0.0, 1.0);
             let vertical = if upper {
                 1.0
-            } else {
+            } else if fade_upper_edge {
                 (t / 0.125).min((1.0 - t) / 0.25).clamp(0.0, 1.0)
+            } else {
+                ((1.0 - t) / 0.25).clamp(0.0, 1.0)
             };
             vertex[2][3] = (128.0 * edge * vertical).round() as u32;
             out.data.extend_from_slice(&vertex);
@@ -854,7 +857,7 @@ mod tests {
         }
         call.uniforms[4][1] = 6;
         let p = projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
-        let panels = sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024))
+        let panels = sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), true)
             .expect("Ruthless Ridge peak strip");
         assert_eq!(panels.len(), 1);
         let panel = &panels[0];
@@ -879,5 +882,36 @@ mod tests {
             assert!((clip[0] / clip[3] - native_ndc[0]).abs() < 1e-4);
             assert!((clip[1] / clip[3] - native_ndc[1]).abs() < 1e-4);
         }
+        // Gravitude's lower sector meets its upper artwork at this edge;
+        // fading it leaves a visible horizontal stripe in the forward view.
+        let mut lower = call.clone();
+        lower.data.clear();
+        for (row, (radius, z)) in [(0.634f32, -0.392f32), (0.372, -0.755), (0.196, -0.879)]
+            .into_iter()
+            .enumerate()
+        {
+            for col in 0..5 {
+                let angle = (-45.0 + 11.25 * col as f32).to_radians();
+                let (s, co) = angle.sin_cos();
+                lower.data.extend_from_slice(&[
+                    [
+                        ((radius * co * 32768.0).round() as i32) as u32,
+                        ((radius * s * 32768.0).round() as i32) as u32,
+                        ((z * 32768.0).round() as i32) as u32,
+                        0,
+                    ],
+                    [4096 - 1024 * col, row as u32 * 2048, 0, 0],
+                    [128; 4],
+                    [0; 4],
+                ]);
+            }
+        }
+        lower.uniforms[4][1] = 15;
+        let faded = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), true)
+            .expect("lower sector");
+        let joined = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false)
+            .expect("joined lower sector");
+        assert_eq!(faded[0].data[4 * 4 + 2][3], 0);
+        assert_eq!(joined[0].data[4 * 4 + 2][3], 128);
     }
 }

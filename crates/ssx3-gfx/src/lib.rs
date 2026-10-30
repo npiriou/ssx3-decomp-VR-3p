@@ -3307,12 +3307,31 @@ impl Build {
                 .enumerate()
                 .all(|(n, texture)| draws[n].tex[0] == Some(texture))
             && std::env::var("SSX3_VR_SKY_CITY_PANO").map_or(true, |v| v != "0");
+        let intimidator_panorama = vr_sky_dome
+            && sky_draws >= 8
+            && [630, 638, 637, 636, 631, 635, 633, 632]
+                .into_iter()
+                .enumerate()
+                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
+            && std::env::var("SSX3_VR_SKY_INTIMIDATOR_PANO").map_or(true, |v| v != "0");
+        let gravitude_panorama = vr_sky_dome
+            && sky_draws >= 8
+            && [766, 774, 773, 772, 767, 771, 770, 768]
+                .into_iter()
+                .enumerate()
+                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
+            && std::env::var("SSX3_VR_SKY_GRAVITUDE_PANO").map_or(true, |v| v != "0");
         let wrapped_sky = supported_ridge_sky
             && !ridge_panorama
             && std::env::var("SSX3_VR_SKY_WRAP").is_ok_and(|v| v == "1");
         let sphere_sky = vr_sky_dome && std::env::var_os("SSX3_VR_SKY_SPHERE").is_some();
-        let replace_blue_sky =
-            panorama_sky || ridge_panorama || city_panorama || wrapped_sky || sphere_sky;
+        let replace_blue_sky = panorama_sky
+            || ridge_panorama
+            || city_panorama
+            || intimidator_panorama
+            || gravitude_panorama
+            || wrapped_sky
+            || sphere_sky;
         let sky_last = vr_sky_dome
             .then(|| {
                 built
@@ -3418,7 +3437,11 @@ impl Build {
                                         }
                                         continue;
                                     }
-                                    if (panorama_sky || ridge_panorama || city_panorama)
+                                    if (panorama_sky
+                                        || ridge_panorama
+                                        || city_panorama
+                                        || intimidator_panorama
+                                        || gravitude_panorama)
                                         && matches!(owner, Owner::Payload(n) if *n > 0 && *n < sky_draws)
                                     {
                                         let xy = b.gs.ctx[0].xyoffset;
@@ -3432,12 +3455,17 @@ impl Build {
                                                 built.frame.matrices.get(draw.matrix as usize)
                                             })
                                             .and_then(|matrix| {
-                                                if ridge_panorama || city_panorama {
+                                                if ridge_panorama
+                                                    || city_panorama
+                                                    || intimidator_panorama
+                                                    || gravitude_panorama
+                                                {
                                                     vr::sky_native_panorama_panels(
                                                         &c,
                                                         matrix.view_proj,
                                                         xyoffset,
                                                         b.gs.size,
+                                                        !gravitude_panorama,
                                                     )
                                                 } else {
                                                     vr::sky_panorama_panels(&c, matrix.view_proj)
@@ -3499,6 +3527,8 @@ impl Build {
                                         && !panorama_sky
                                         && !ridge_panorama
                                         && !city_panorama
+                                        && !intimidator_panorama
+                                        && !gravitude_panorama
                                         && matches!(owner, Owner::Payload(n) if *n > 0 && *n < sky_draws)
                                     {
                                         if !c.pre.is_empty() {
@@ -3543,7 +3573,12 @@ impl Build {
                     _ => {}
                 }
                 if Some(i) == sky_last {
-                    let complete = if panorama_sky || ridge_panorama || city_panorama || wrapped_sky
+                    let complete = if panorama_sky
+                        || ridge_panorama
+                        || city_panorama
+                        || intimidator_panorama
+                        || gravitude_panorama
+                        || wrapped_sky
                     {
                         if let Some(sphere) = vr::sky_dome_background(&sky_dome_calls) {
                             b.gs.gpu_draw(sphere);

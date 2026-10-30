@@ -156,8 +156,8 @@ fn main() {
                                 }
                             }
                         }
-                        eprintln!("[vr-matrix] sky draw {n}: {:?} layer {} matrix {} header {} state_change {} calls {:?}",
-                            d.state.material, d.state.layer, d.matrix, d.header_matrix, d.state_change, calls);
+                        eprintln!("[vr-matrix] sky draw {n}: {:?} layer {} matrix {} tex {:?} header {} state_change {} calls {:?}",
+                            d.state.material, d.state.layer, d.matrix, d.tex, d.header_matrix, d.state_change, calls);
                     }
                 }
             }

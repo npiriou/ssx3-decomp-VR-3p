@@ -83,8 +83,23 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   boundary remains during the frame-1500 camera roll. A unit test checks
   the upper strip's native screen sector, UVs and edge alpha. The earlier
   native-triangle wrap remains available for diagnosis when the panorama
-  is disabled (`SSX3_VR_SKY_WRAP=1`). Other courses and the low-resolution
-  asset treatment remain open.
+  is disabled (`SSX3_VR_SKY_WRAP=1`). Other event variants and the
+  low-resolution asset treatment remain open.
+  Intimidator and Gravitude have now been surveyed through frame 1500 with
+  90° VR visibility; both runs ended without a game halt or frame-memory
+  miss. Their eight-panel sky sequences use the same mesh layout as Metro
+  City, and exact texture-sequence guards enable the native-sector sphere
+  reconstruction for each course. At Intimidator frame 1000, the +90° sky's
+  large polygons and hard seams become a continuous cloudy dome; 0°, -90°
+  and 180° captures retain course objects. Gravitude frame 1500 had a large
+  angular sky patch at +90°. Its reconstruction removes that patch; keeping
+  the native panel's upper edge opaque also preserves the forward mountain
+  backdrop without a horizontal blend band. Both treatments are now the VR
+  defaults (`SSX3_VR_SKY_INTIMIDATOR_PANO=0` and
+  `SSX3_VR_SKY_GRAVITUDE_PANO=0` disable them). Close terrain and object
+  textures remain visibly coarse, especially in enclosed side views. The
+  texture sequences came from the frame dump's matrix/draw inspection
+  (`SSX3_VR_INSPECT_MATRICES=1` now prints each sky draw's texture IDs).
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it
@@ -160,6 +175,13 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   side-view stereo render had full nonblack coverage in both eyes and
   3,182,734 differing pixels. These results validate the offline renderer,
   not a headset frame rate.
+  At 1024², Intimidator frame 1000 and Gravitude frame 1500 both produced
+  full nonblack left/right images at +90°. Direct and retained-scene images
+  matched byte-for-byte for each eye; 927,838 and 681,348 pixels differed
+  between the eyes, respectively. Separate live-game, offline-stereo
+  1920² runs at frames 420–500 measured 13.22 ms/frame (p95 16.68) on
+  Intimidator and 12.82 ms/frame (p95 16.36) on Gravitude. Neither run
+  halted or missed frame memory. OpenXR costs remain unmeasured.
   Their post-process paths differ, so this is evidence only that the stereo
   producer can run near 60 Hz offline. The OpenXR blit, compositor, headset
   pacing and queue synchronization are absent; the live target remains

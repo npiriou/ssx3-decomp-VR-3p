@@ -40,6 +40,8 @@ configuration. The plain command above is the recommended way to play.
 | `SSX3_VR_SKY_PANORAMA=0` | Disable Snow Jam's VR sky reconstruction, which keeps the two source panels containing sky and fills other directions from the native polar dome (enabled by default for that course). |
 | `SSX3_VR_SKY_RIDGE_PANO=0` | Disable Ruthless Ridge's VR sky backdrop (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_CITY_PANO=0` | Disable Metro City's VR sky backdrop (enabled by default for its matched native sky sequence). |
+| `SSX3_VR_SKY_INTIMIDATOR_PANO=0` | Disable Intimidator's VR sky reconstruction (enabled by default for its matched native sky sequence). |
+| `SSX3_VR_SKY_GRAVITUDE_PANO=0` | Disable Gravitude's VR sky reconstruction (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_WRAP=1` | Enable the earlier experimental Ruthless Ridge sky-panel wrap for comparison; also set `SSX3_VR_SKY_RIDGE_PANO=0`. |
 | `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
 | `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
