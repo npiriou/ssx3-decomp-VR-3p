@@ -155,12 +155,6 @@ pub struct Inner {
     /// eased from frame to frame (`gs::Gs::key_ambient`).
     live_ambient: [f32; 3],
     live_colour: [f32; 3],
-    /// The GraphicsMan of the frame being drawn (TexMan for the cut-outs).
-    frame_gm: u32,
-    /// The world's shadow casters of the frame being drawn.
-    world_casters: Option<std::sync::Arc<ssx3_render::world_casters::Casters>>,
-    /// The world painter's sun (`world_casters::painter_sun`).
-    painter_sun: Option<ssx3_render::world_casters::PainterSun>,
     /// Seconds since the renderer started (animated effects).
     t0: web_time::Instant,
     /// Batches of VIF phase 1 (the 3D scene) in this frame.
@@ -205,9 +199,9 @@ pub struct Inner {
     vr_menu: bool,
     /// The latest published VR scene and its detached draw geometry.
     vr_last_scene: Option<RetainedVrScene>,
-    /// Geometry just rendered, before `render_published` attaches its memory
-    /// snapshot. Direct frame replays recycle it at the next frame instead.
-    vr_pending_geometry: Option<gs::FrameGeometry>,
+    /// Prepared draw data, before `render_published` attaches frame memory.
+    /// Direct frame replays recycle its geometry at the next frame instead.
+    vr_pending_scene: Option<(gs::FrameGeometry, DrawFrameInputs)>,
     /// Vertex and uniform buffers, kept across frames (grown as needed).
     vbuf: Option<wgpu::Buffer>,
     ubuf: Option<wgpu::Buffer>,
@@ -229,6 +223,19 @@ type Job = ssx3_ps2::frame_sink::Published;
 struct RetainedVrScene {
     published: Job,
     geometry: gs::FrameGeometry,
+    inputs: DrawFrameInputs,
+}
+
+/// Values produced with one native frame and used by all of its eye draws.
+/// Renderer resources and temporal lighting remain in `Inner` for now.
+struct DrawFrameInputs {
+    phase1_end: usize,
+    display_fbp: Option<u32>,
+    zscale: f32,
+    frame_gm: u32,
+    world_casters: Option<Arc<ssx3_render::world_casters::Casters>>,
+    painter_sun: Option<ssx3_render::world_casters::PainterSun>,
+    flare_light: Option<(f32, f32, u32)>,
 }
 
 /// What the render thread shares with the game and the window without
@@ -359,9 +366,6 @@ impl Renderer {
                 post: None,
                 shadow: None,
                 key_light: [0.0, 0.6, 0.8],
-                world_casters: None,
-                painter_sun: None,
-                frame_gm: 0,
                 live_ambient: [110.0, 112.0, 120.0],
                 live_colour: [90.0, 85.0, 70.0],
                 flare_sun: None,
@@ -383,7 +387,7 @@ impl Renderer {
                 vr_ui: false,
                 vr_menu: false,
                 vr_last_scene: None,
-                vr_pending_geometry: None,
+                vr_pending_scene: None,
                 staged: None,
                 vbuf: None,
                 gbuf: [None, None, None, None],
@@ -1030,12 +1034,12 @@ impl Inner {
 
     /// Textures for the render targets the game drew into (resized when
     /// they grow).
-    fn ensure_rts(&mut self, scene: &gs::FrameState) {
+    fn ensure_rts(&mut self, scene: &gs::FrameState, inputs: &DrawFrameInputs) {
         let s = self.rt_scale;
         for (&fbp, rt) in &scene.rts {
             // The display buffer is a copy of the frame: the main target's
             // scale; other targets an integer one.
-            let (fx, fy) = self.rt_fxy(fbp);
+            let (fx, fy) = self.rt_fxy(fbp, inputs.display_fbp);
             let _ = s;
             let (pw, ph) = (
                 (rt.w as f32 * fx).round() as u32,
@@ -1228,8 +1232,8 @@ impl Inner {
     }
 
     /// GS → target pixel factors of render target `fbp`.
-    fn rt_fxy(&self, fbp: u32) -> (f32, f32) {
-        if Some(fbp) == self.display_fbp {
+    fn rt_fxy(&self, fbp: u32, display_fbp: Option<u32>) -> (f32, f32) {
+        if Some(fbp) == display_fbp {
             self.fxy
         } else {
             (self.rt_scale as f32, self.rt_scale as f32)
@@ -1357,10 +1361,11 @@ impl Inner {
     /// when it has a perspective VR scene that can be viewed again.
     fn render_published(&mut self, f: Job) {
         self.render_built(&f.built, &f.carry, &f.mem);
-        if let Some(geometry) = self.vr_pending_geometry.take() {
+        if let Some((geometry, inputs)) = self.vr_pending_scene.take() {
             self.vr_last_scene = Some(RetainedVrScene {
                 published: f,
                 geometry,
+                inputs,
             });
         }
     }
@@ -1414,8 +1419,9 @@ impl Inner {
         self.stats.frames += 1;
         self.rendered_eyes = None;
         let recycled = self
-            .vr_pending_geometry
+            .vr_pending_scene
             .take()
+            .map(|(geometry, _)| geometry)
             .or_else(|| self.vr_last_scene.take().map(|scene| scene.geometry));
         self.vr_last_scene = None;
         if let Some(geometry) = recycled {
@@ -1423,13 +1429,19 @@ impl Inner {
         }
         let t_start = web_time::Instant::now();
         let mut b = self.take_build();
-        self.world_casters = built.casters.clone();
-        self.painter_sun = built.sun;
-        self.frame_gm = built.frame.gm;
         let eyes = *self.shared.vr_eyes.lock().unwrap();
         Build::run(&mut b, built, mem, eyes);
         self.put_build(b);
         self.timing.1[0] += t_start.elapsed().as_secs_f64() * 1e3;
+        let inputs = DrawFrameInputs {
+            phase1_end: self.phase1_end,
+            display_fbp: self.display_fbp,
+            zscale: self.zscale,
+            frame_gm: built.frame.gm,
+            world_casters: built.casters.clone(),
+            painter_sun: built.sun,
+            flare_light: ssx3_ps2::frame_sink::take_light(),
+        };
         // Ordered GS state carries into the next game frame. The complete
         // geometry belongs to this prepared scene and is shared by its eyes.
         let geometry = self.gs.take_geometry();
@@ -1457,7 +1469,14 @@ impl Inner {
             ) {
                 for (index, reprojection) in [left, right].into_iter().enumerate() {
                     self.vr_eye = Some((index, reprojection));
-                    self.draw_built(mem, &geometry, &geometry.batches, index != 0, false);
+                    self.draw_built(
+                        mem,
+                        &geometry,
+                        &inputs,
+                        &geometry.batches,
+                        index != 0,
+                        false,
+                    );
                 }
                 self.vr_eye = None;
                 // The spatial HUD pass reads only main-target HUD batches.
@@ -1479,13 +1498,14 @@ impl Inner {
                 self.draw_built(
                     mem,
                     &geometry,
+                    &inputs,
                     hud_batches.as_deref().unwrap_or(&geometry.batches),
                     true,
                     false,
                 );
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
                 self.vr_ui = false;
-                self.vr_pending_geometry = Some(geometry);
+                self.vr_pending_scene = Some((geometry, inputs));
                 self.rendered_eyes = Some(eyes);
                 return queue;
             }
@@ -1497,7 +1517,7 @@ impl Inner {
             self.vr_ui = true;
             self.vr_menu = true;
             std::mem::swap(&mut self.targets, &mut self.ui_targets);
-            self.draw_built(mem, &geometry, &geometry.batches, false, false);
+            self.draw_built(mem, &geometry, &inputs, &geometry.batches, false, false);
             std::mem::swap(&mut self.targets, &mut self.ui_targets);
             self.vr_ui = false;
             self.vr_menu = false;
@@ -1512,7 +1532,7 @@ impl Inner {
             return queue;
         }
         self.ui_present = None;
-        self.draw_built(mem, &geometry, &geometry.batches, false, false);
+        self.draw_built(mem, &geometry, &inputs, &geometry.batches, false, false);
         self.gs.reuse_geometry_storage(geometry);
         queue
     }
@@ -1551,6 +1571,7 @@ impl Inner {
                 self.draw_built(
                     &scene.published.mem,
                     &scene.geometry,
+                    &scene.inputs,
                     &scene.geometry.batches,
                     true,
                     true,
@@ -1570,6 +1591,7 @@ impl Inner {
         &mut self,
         mem: &dyn Mem,
         geometry: &gs::FrameGeometry,
+        inputs: &DrawFrameInputs,
         batches: &[gs::Batch],
         reuse_scene_inputs: bool,
         view_only: bool,
@@ -1590,7 +1612,7 @@ impl Inner {
         self.rt_scale = (self.fxy.0.max(self.fxy.1).round() as u32).clamp(1, 8);
         self.ensure_targets(pw, ph);
         if !self.vr_ui || self.vr_menu {
-            self.ensure_rts(scene);
+            self.ensure_rts(scene, inputs);
         }
         if geometry.verts.is_empty() && geometry.gpu.calls.is_empty() {
             return;
@@ -1659,7 +1681,10 @@ impl Inner {
         if shadow::debug("lightlog") {
             eprintln!(
                 "[light] {} sun {:.3} {:.3} {:.3} amb {:.1} {:.1} {:.1} col {:.1} {:.1} {:.1}",
-                self.world_casters.as_ref().map_or("", |c| c.world.as_str()),
+                inputs
+                    .world_casters
+                    .as_ref()
+                    .map_or("", |c| c.world.as_str()),
                 self.key_light[0],
                 self.key_light[1],
                 self.key_light[2],
@@ -1681,9 +1706,12 @@ impl Inner {
         }
         // The sun: the meshes' key light (`SSX3_SHADOW_DEBUG=flare-sun`:
         // where the game draws the sun sprite instead).
-        if let (Some((x, y, z)), Some(cam)) =
-            (ssx3_ps2::frame_sink::take_light(), scene.cam.as_ref())
-        {
+        if let (Some((x, y, z)), Some(cam)) = (
+            (!reuse_scene_inputs)
+                .then_some(inputs.flare_light)
+                .flatten(),
+            scene.cam.as_ref(),
+        ) {
             if let Some(d) = shadow::sun_from_screen(cam, x, y, z) {
                 let d = d.map(|v| v as f32);
                 let m = match self.flare_sun {
@@ -1707,7 +1735,7 @@ impl Inner {
             let n = (k[0] * k[0] + k[1] * k[1] + k[2] * k[2]).sqrt().max(1e-6);
             k.map(|x| x / n)
         };
-        let painter = self.painter_sun.and_then(|p| p.dir().map(|d| (d, p)));
+        let painter = inputs.painter_sun.and_then(|p| p.dir().map(|d| (d, p)));
         let (key, sun_source) = match self.flare_sun {
             Some(f) if shadow::debug("flare-sun") => (f, 0),
             _ if kl[2] >= 0.26 => (self.key_light, 0),
@@ -1734,7 +1762,7 @@ impl Inner {
             self.shadow = Some(shadow::Shadow::new(&self.dev, map_size));
         }
         if let (Some(c), true) = (
-            self.world_casters.clone(),
+            inputs.world_casters.clone(),
             light.is_some() && (!reuse_scene_inputs || shadow_changed),
         ) {
             self.shadow
@@ -1745,9 +1773,12 @@ impl Inner {
         // With the world's casters the terrain casts from them (the game's
         // terrain draws only cover what the camera sees).
         let native_terrain =
-            light.is_some() && self.world_casters.is_some() && !shadow::debug("no-world");
+            light.is_some() && inputs.world_casters.is_some() && !shadow::debug("no-world");
         let sh = self.shadow.as_ref().unwrap();
-        let world = self.world_casters.as_ref().map_or("", |c| c.world.as_str());
+        let world = inputs
+            .world_casters
+            .as_ref()
+            .map_or("", |c| c.world.as_str());
         let g = shadow::lighting(world);
         let (amb, col) = (
             self.live_ambient.map(|v| v / 128.0),
@@ -1766,7 +1797,7 @@ impl Inner {
         if shadow::debug("print") {
             eprintln!(
                 "shadow: sun source {sun_source} key {kl:?} painter {:?}",
-                self.painter_sun
+                inputs.painter_sun
             );
         }
         let lt = shadow::Lighting {
@@ -2143,7 +2174,7 @@ impl Inner {
             let (fx, fy) = if st.target == scene.main_fbp {
                 self.fxy
             } else {
-                self.rt_fxy(st.target)
+                self.rt_fxy(st.target, inputs.display_fbp)
             };
             let px = |v: u32, f: f32| (v as f32 * f).round() as u32;
             let vr_world = self.vr_eye.is_some()
@@ -2546,7 +2577,7 @@ impl Inner {
             .and_then(|s| s.cutouts.as_ref())
             .map(|c| c.1.clone());
         if let (true, Some(runs), Some(_)) = (native_terrain && !self.vr_ui, runs, light.as_ref()) {
-            let texman = frame::word(mem, self.frame_gm + frame::gm::TEXMAN);
+            let texman = frame::word(mem, inputs.frame_gm + frame::gm::TEXMAN);
             let samp = self.dev.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("ssx3-gfx cut-out"),
                 address_mode_u: wgpu::AddressMode::Repeat,
@@ -2789,7 +2820,7 @@ impl Inner {
                 mapped_at_creation: false,
             })
         });
-        let phase1_end = self.phase1_end;
+        let phase1_end = inputs.phase1_end;
         let mut depth_taken = false;
         // Game depth queries advance only with the simulation. A view-only
         // refresh must not publish another eye's Z buffer as a new tick.
@@ -3092,7 +3123,7 @@ impl Inner {
         }
         // The image on screen, for the window.
         let shown = match (!self.vr_ui)
-            .then(|| self.display_fbp.and_then(|f| self.rts.get(&f)))
+            .then(|| inputs.display_fbp.and_then(|f| self.rts.get(&f)))
             .flatten()
         {
             Some(r) => &r.color,
@@ -3242,8 +3273,15 @@ impl Inner {
             buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
                 m.store(r.is_ok(), std::sync::atomic::Ordering::Release)
             });
-            self.pending_depth =
-                Some((buf, sub_idx, self.zscale, w, h, mapped, self.frames_in - 1));
+            self.pending_depth = Some((
+                buf,
+                sub_idx,
+                inputs.zscale,
+                w,
+                h,
+                mapped,
+                self.frames_in - 1,
+            ));
             self.timing.1[3] += t_sub.elapsed().as_secs_f64() * 1e3;
         }
         if let Some(pb) = probe_buf {

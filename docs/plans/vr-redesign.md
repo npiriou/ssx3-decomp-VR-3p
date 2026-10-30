@@ -675,10 +675,21 @@ stereo eyes, and the desktop image, still match the preceding renderer pixel
 for pixel; all 31 graphics library tests pass. A first muted offline run of
 this cut completed 650 ticks with both eyes filled and distinct. Two muted
 offline runs measured 51.0 and 59.1 fresh stereo images/s over frames
-420–650, showing run-to-run variation. The renderer's own
-per-frame state, frame-memory snapshot, texture cache and queue still need
-explicit ownership and GPU completion fences before preparation and OpenXR
-eye rendering can overlap. The 60 fresh stereo/s target remains open.
+420–650, showing run-to-run variation. At that point the renderer's
+per-frame inputs still came from mutable `Inner` state. The 60 fresh
+stereo/s target remained open.
+
+The frame's renderer-owned inputs are now retained beside that GS snapshot:
+phase boundary, display target, depth scale, GraphicsMan address, world shadow
+casters, painter sun and the lens-flare light query. A head-pose refresh reads
+these from the published frame rather than from the next mutable renderer
+state. Frozen Gravitude frame-650 forward and +90° stereo eyes, UI and desktop
+output match the previous commit byte-for-byte; all 31 graphics tests pass.
+A muted 1920-square 650-tick offline run with a 90° turn completed a retained
+refresh with distinct, filled eyes and measured 59.8 game ticks/s and 59.8
+fresh stereo images/s over frames 420–651. Temporal light smoothing, texture
+and target resources, and queue submission are still owned by `Inner`; this
+cut alone does not establish XR-cadence parallel rendering or sustained 60.
 
 The frame stream is stateful. VIF/GS carry, texture uploads, and other
 resource changes must be consumed in order even when the headset renders the
