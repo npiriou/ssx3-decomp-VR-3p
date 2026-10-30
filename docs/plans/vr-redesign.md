@@ -704,6 +704,29 @@ fully covered and distinct. Short offline windows and machine variation
 still do not prove sustained headset pacing. Renderer timing logs now
 separate game-scene build time from each eye/HUD draw-pass time.
 
+### Metro City live sky variant (2026-10-31)
+
+A muted 1920-square live capture of BRA2 through game tick 650 exposed a
+sequence the frozen frame-500 survey missed. The first five sky textures
+were unchanged, but the visible sequence ended at texture 423 after seven
+sky draws. A later frame dump had eight sky draws ending 425, 424, 423.
+The VR skyline guard
+only accepted the earlier eight-draw sequence ending 425, 423, 422, so the
+live view used the original forward-camera sky panels at side angles.
+The guard now accepts the observed seven- and eight-draw variants and
+reconstructs them from the original native mesh and textures. A live +90°
+capture changes 609,777 pixels in the upper eye image while leaving the
+lower course image virtually identical. A 180° capture still fills all
+3,686,400 pixels in each eye; both eyes differ at 2,944,319 pixels.
+Race frames 420–650 measured 59.8 game ticks/s and 59.8 fresh stereo
+images/s in the rear run. All 34 `ssx3-gfx` unit tests pass.
+
+The large close building in the +90° image remains visually distorted.
+A frame-650 pixel probe identifies it as a native matrix-1 General/Mat3Mesh
+course draw (draw 128, texture 349), separate from the sky. This is still
+G1/G4 work; the sky fix does not solve the close-object geometry or the
+stretched snow texture in the rear view. Headset pacing remains unverified.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

@@ -3863,11 +3863,21 @@ impl Build {
         let ridge_panorama = supported_ridge_sky
             && std::env::var("SSX3_VR_SKY_RIDGE_PANO").map_or(true, |v| v != "0");
         let city_panorama = vr_sky_dome
-            && sky_draws >= 8
-            && [420, 428, 427, 426, 421, 425, 423, 422]
+            && sky_draws >= 7
+            && [420, 428, 427, 426, 421]
                 .into_iter()
                 .enumerate()
                 .all(|(n, texture)| draws[n].tex[0] == Some(texture))
+            // Course visibility can omit the last city panel; the remaining
+            // panels still use the same native mesh and UV layout.
+            && (sky_draws == 7
+                && [draws[5].tex[0], draws[6].tex[0]] == [Some(425), Some(423)]
+                || sky_draws >= 8
+                    && matches!(
+                        [draws[5].tex[0], draws[6].tex[0], draws[7].tex[0]],
+                        [Some(425), Some(423), Some(422)]
+                            | [Some(425), Some(424), Some(423)]
+                    ))
             && std::env::var("SSX3_VR_SKY_CITY_PANO").map_or(true, |v| v != "0");
         let intimidator_panorama = vr_sky_dome
             && sky_draws >= 8
