@@ -986,7 +986,10 @@ impl Inner {
                 );
             }
         }
-        let levels: &[tex::Decoded] = replaced.as_deref().unwrap_or(std::slice::from_ref(&d));
+        let levels: &[tex::Decoded] = replaced
+            .as_ref()
+            .map(|levels| levels.as_slice())
+            .unwrap_or(std::slice::from_ref(&d));
         let t = self.dev.create_texture(&wgpu::TextureDescriptor {
             label: Some("ssx3-gfx tex"),
             size: wgpu::Extent3d {

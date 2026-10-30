@@ -147,6 +147,9 @@ the desktop game keeps `textures/replace`. A file with the same texture name
 in an explicit `SSX3_TEX_REPLACE` takes precedence, and
 `SSX3_TEX_REPLACE=0` disables all replacements. The local Gravitude sky pack
 is generated from the owner's disc; see [`plans/vr-redesign.md`](plans/vr-redesign.md).
+VR decodes replacement PNGs and builds their mipmaps before the game/render
+pipeline starts, up to 64 MiB of decoded textures; the remainder loads on first
+use. `SSX3_VR_PRELOAD_TEXTURES=0` restores first-use loading for comparison.
 
 Alpha in the PNGs is the GS's doubled (255 = opaque). Render targets, the frame-feedback
 passes and movie frames are not textures and are not dumped. `textures/` is ignored by git

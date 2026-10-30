@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::tex::{Decoded, TexKey};
 
@@ -36,6 +37,8 @@ pub struct Pack {
     dumped: HashSet<String>,
     /// Replacement images by name.
     replace: HashMap<String, PathBuf>,
+    /// VR pack images decoded before the game starts presenting frames.
+    preloaded: HashMap<String, Arc<Vec<Decoded>>>,
     /// Small, course-specific VR replacements included in the executable.
     vr_replacements: bool,
 }
@@ -78,12 +81,46 @@ impl Pack {
                 eprintln!("[gfx] {} replacement textures in {dir}", replace.len());
             }
         }
+        let vr_replacements =
+            dir != "0" && std::env::var("SSX3_VR_TEXTURES").is_ok_and(|v| v == "1");
+        let mut preloaded = HashMap::new();
+        if vr_replacements && std::env::var("SSX3_VR_PRELOAD_TEXTURES").as_deref() != Ok("0") {
+            const BUDGET: usize = 64 * 1024 * 1024;
+            let mut used = 0usize;
+            let mut names: Vec<_> = replace.keys().cloned().collect();
+            names.sort();
+            for name in names {
+                let Some(path) = replace.get(&name) else {
+                    continue;
+                };
+                let Ok((w, h, rgba)) = read_png(path) else {
+                    continue;
+                };
+                if w > 4096 || h > 4096 {
+                    continue;
+                }
+                let levels = decoded_mips(w, h, rgba);
+                let bytes: usize = levels.iter().map(|d| d.rgba.len() * 4).sum();
+                if used + bytes > BUDGET {
+                    continue;
+                }
+                used += bytes;
+                preloaded.insert(name, Arc::new(levels));
+            }
+            if !preloaded.is_empty() {
+                eprintln!(
+                    "[gfx] preloaded {} VR textures ({:.1} MiB decoded)",
+                    preloaded.len(),
+                    used as f64 / 1048576.0
+                );
+            }
+        }
         Pack {
             dump,
             dumped: HashSet::new(),
             replace,
-            vr_replacements: dir != "0"
-                && std::env::var("SSX3_VR_TEXTURES").is_ok_and(|v| v == "1"),
+            preloaded,
+            vr_replacements,
         }
     }
 
@@ -112,8 +149,11 @@ impl Pack {
     }
 
     /// The replacement for `k`, if there is one: its mipmap chain (GS alpha).
-    pub fn load(&self, k: &TexKey) -> Option<Vec<Decoded>> {
+    pub fn load(&self, k: &TexKey) -> Option<Arc<Vec<Decoded>>> {
         let name = name(k);
+        if let Some(levels) = self.preloaded.get(&name) {
+            return Some(Arc::clone(levels));
+        }
         let source = if let Some(path) = self.replace.get(&name) {
             read_png(path)
         } else if self.vr_replacements && name == "d5c495a1196f376d" {
@@ -122,23 +162,25 @@ impl Pack {
             return None;
         };
         match source {
-            Ok((w, h, rgba)) => {
-                let px: Vec<u32> = rgba
-                    .chunks(4)
-                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], ((c[3] as u32 + 1) / 2) as u8]))
-                    .collect();
-                Some(mips(Decoded {
-                    width: w,
-                    height: h,
-                    rgba: px,
-                }))
-            }
+            Ok((w, h, rgba)) => Some(Arc::new(decoded_mips(w, h, rgba))),
             Err(e) => {
                 eprintln!("[gfx] replacement {name}: {e}");
                 None
             }
         }
     }
+}
+
+fn decoded_mips(w: u32, h: u32, rgba: Vec<u8>) -> Vec<Decoded> {
+    let px: Vec<u32> = rgba
+        .chunks(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], ((c[3] as u32 + 1) / 2) as u8]))
+        .collect();
+    mips(Decoded {
+        width: w,
+        height: h,
+        rgba: px,
+    })
 }
 
 fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
@@ -264,6 +306,7 @@ mod tests {
             dump: Some(dir.clone()),
             dumped: HashSet::new(),
             replace: HashMap::new(),
+            preloaded: HashMap::new(),
             vr_replacements: false,
         };
         p.dump(&k, &d);

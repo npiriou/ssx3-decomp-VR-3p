@@ -468,6 +468,26 @@ measurement.
 Keep headset review behind the remaining G1 coverage and G3 pacing work.
 All game captures in this investigation used `SSX3_AUDIO=0`.
 
+### VR texture preparation (2026-10-31)
+
+The VR renderer now decodes local replacement PNGs and creates their mip chains
+before the game/render workers start, with a 64 MiB decoded-data limit. The
+local Gravitude pack preloads 9 images (24.0 MiB); first-use texture upload to
+the GPU still occurs on demand. This removes PNG decoding from the frame path
+for those images, without claiming an image-quality change. A muted 650-tick
+ERA5 offline A/B at 1920 square per eye with a 90-degree turn measured 59.9
+fresh stereo images/s with preloading disabled and 59.5 with it enabled over
+frames 420–651. That difference is within run variation; sustained cadence is
+unchanged by this preparation. `SSX3_VR_PRELOAD_TEXTURES=0` is the comparison
+switch.
+
+A separate source-mesh experiment subdivided the cliff while preserving its
+pre-divided STQ and fog varyings. Zero-displacement refinement nearly preserved
+the original image, but local-axis displacement made spikes and the silhouette
+remained poor. Removing the cliff revealed a snowy background but erased real
+course geometry; front-face culling likewise left holes. No mesh experiment
+was installed. A source-space silhouette and material solution remains G1 work.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase
