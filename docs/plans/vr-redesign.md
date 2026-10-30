@@ -186,6 +186,13 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   producer can run near 60 Hz offline. The OpenXR blit, compositor, headset
   pacing and queue synchronization are absent; the live target remains
   unverified.
+  The race HUD pass now receives only its main-target HUD batches when shadows
+  are off, and avoids preparing the world VU inputs if none of those HUD
+  batches uses them. Frozen 1920-square ARA1 frame-1500 and DRA4 frame-1000
+  captures had byte-identical left, right and HUD PNGs before and after both
+  changes. The shadow path retains the full batch list because it also derives
+  a silhouette-target set from world draws. Adjacent repeated-render timings
+  were noisy, so this has no claimed FPS gain or live OpenXR validation.
   A trial of generating mipmaps for the original one-level textures did not
   materially improve the close-course appearance in 1920-square eye captures.
   In a 10-repeat frozen-frame comparison, ARA1 changed about 280,000 of

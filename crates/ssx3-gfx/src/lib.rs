@@ -1113,9 +1113,22 @@ impl Inner {
                     self.draw_built(mem, &batches, index != 0, false);
                 }
                 self.vr_eye = None;
+                // The spatial HUD pass reads only main-target HUD batches.
+                // Keep their original order, but avoid scanning and planning
+                // the full world list for a third time at a smaller target.
+                // The shadow path also derives a silhouette-target set from
+                // world batches, so keep its full input until that set is
+                // prepared separately from the HUD draw.
+                let hud_batches: Option<Vec<_>> = (!self.opts.shadows).then(|| {
+                    batches
+                        .iter()
+                        .filter(|b| b.state.target == self.gs.main_fbp && b.tag.hud)
+                        .cloned()
+                        .collect()
+                });
                 self.vr_ui = true;
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
-                self.draw_built(mem, &batches, true, false);
+                self.draw_built(mem, hud_batches.as_deref().unwrap_or(&batches), true, false);
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
                 self.vr_ui = false;
                 self.vr_last_batches = Some(batches);
@@ -1399,8 +1412,24 @@ impl Inner {
         // GPU-computed draws (ssx3_render::gpu): their uniforms, inputs and
         // triangle lists, bound as group 1 (and again with the placeholder
         // shadow map for the shadow pass).
+        // A race HUD draws only its main-target HUD batches. Most frames have
+        // hundreds of world VU calls but no HUD VU call, so the third VR pass
+        // need not prepare those world inputs and bind groups again.
+        let hud_gpu = self.vr_ui
+            && !self.vr_menu
+            && batches.iter().any(|b| {
+                b.state.target == self.gs.main_fbp
+                    && b.tag.hud
+                    && b.gpu.is_some()
+                    && self.opts.keeps_post(b.tag.post)
+            });
+        let needs_gpu = if self.vr_ui && !self.vr_menu {
+            hud_gpu
+        } else {
+            !self.gs.gpu.calls.is_empty()
+        };
         let mut gpu_bind_shadow = None;
-        let gpu_bind = (!self.gs.gpu.calls.is_empty()).then(|| {
+        let gpu_bind = needs_gpu.then(|| {
             let g = &self.gs.gpu;
             // (u32 slices as their bytes, no copy: the GPU reads little-endian
             // words, as the targets store them.)
