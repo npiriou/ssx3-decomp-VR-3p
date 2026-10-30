@@ -1030,9 +1030,9 @@ impl Inner {
 
     /// Textures for the render targets the game drew into (resized when
     /// they grow).
-    fn ensure_rts(&mut self) {
+    fn ensure_rts(&mut self, scene: &gs::FrameState) {
         let s = self.rt_scale;
-        for (&fbp, rt) in &self.gs.rts {
+        for (&fbp, rt) in &scene.rts {
             // The display buffer is a copy of the frame: the main target's
             // scale; other targets an integer one.
             let (fx, fy) = self.rt_fxy(fbp);
@@ -1238,9 +1238,8 @@ impl Inner {
 
     /// A 256×1 texture from the depth-fog CLUT `i` of this frame (PSMCT32,
     /// CSM1).
-    fn clut_texture(&self, i: u32) -> Option<wgpu::TextureView> {
-        let up = self
-            .gs
+    fn clut_texture(&self, scene: &gs::FrameState, i: u32) -> Option<wgpu::TextureView> {
+        let up = scene
             .fog_cluts
             .get(i as usize)
             .filter(|u| !u.data.is_empty())?;
@@ -1471,7 +1470,7 @@ impl Inner {
                     geometry
                         .batches
                         .iter()
-                        .filter(|b| b.state.target == self.gs.main_fbp && b.tag.hud)
+                        .filter(|b| b.state.target == geometry.state.main_fbp && b.tag.hud)
                         .cloned()
                         .collect()
                 });
@@ -1576,9 +1575,9 @@ impl Inner {
         view_only: bool,
     ) {
         let t_built = web_time::Instant::now();
+        let scene = &geometry.state;
         self.timing.0 += 1;
-        let p0 = (self.gs.prims, self.gs.dropped, self.gs.unknown_tex);
-        let (w, h) = self.gs.size;
+        let (w, h) = scene.size;
         // The original UI is authored at the GS resolution (typically
         // 640x448). A 1024-square texture stays sharp on the spatial panel
         // without paying for a third 1920-square render each game frame.
@@ -1591,11 +1590,8 @@ impl Inner {
         self.rt_scale = (self.fxy.0.max(self.fxy.1).round() as u32).clamp(1, 8);
         self.ensure_targets(pw, ph);
         if !self.vr_ui || self.vr_menu {
-            self.ensure_rts();
+            self.ensure_rts(scene);
         }
-        self.stats.prims += self.gs.prims - p0.0;
-        self.stats.dropped += self.gs.dropped - p0.1;
-        self.stats.unknown_tex += self.gs.unknown_tex - p0.2;
         if geometry.verts.is_empty() && geometry.gpu.calls.is_empty() {
             return;
         }
@@ -1653,12 +1649,11 @@ impl Inner {
                 self.key_light, projector
             );
         }
-        if !reuse_scene_inputs && self.gs.key_count > 0 {
-            let n = self.gs.key_count as f32;
+        if !reuse_scene_inputs && scene.key_count > 0 {
+            let n = scene.key_count as f32;
             for c in 0..3 {
-                self.live_ambient[c] =
-                    self.live_ambient[c] * 0.9 + self.gs.key_ambient[c] / n * 0.1;
-                self.live_colour[c] = self.live_colour[c] * 0.9 + self.gs.key_colour[c] / n * 0.1;
+                self.live_ambient[c] = self.live_ambient[c] * 0.9 + scene.key_ambient[c] / n * 0.1;
+                self.live_colour[c] = self.live_colour[c] * 0.9 + scene.key_colour[c] / n * 0.1;
             }
         }
         if shadow::debug("lightlog") {
@@ -1676,7 +1671,7 @@ impl Inner {
                 self.live_colour[2]
             );
         }
-        let k = self.gs.key_light;
+        let k = scene.key_light;
         let kn = (k[0] * k[0] + k[1] * k[1] + k[2] * k[2]).sqrt();
         if !reuse_scene_inputs && kn > 1e-3 {
             let p = self.key_light;
@@ -1687,7 +1682,7 @@ impl Inner {
         // The sun: the meshes' key light (`SSX3_SHADOW_DEBUG=flare-sun`:
         // where the game draws the sun sprite instead).
         if let (Some((x, y, z)), Some(cam)) =
-            (ssx3_ps2::frame_sink::take_light(), self.gs.cam.as_ref())
+            (ssx3_ps2::frame_sink::take_light(), scene.cam.as_ref())
         {
             if let Some(d) = shadow::sun_from_screen(cam, x, y, z) {
                 let d = d.map(|v| v as f32);
@@ -1722,10 +1717,10 @@ impl Inner {
             },
         };
         let light = if self.opts.shadows {
-            self.gs
+            scene
                 .cam
                 .as_ref()
-                .and_then(|c| shadow::light(c, key, self.gs.size))
+                .and_then(|c| shadow::light(c, key, scene.size))
         } else {
             None
         };
@@ -1792,7 +1787,7 @@ impl Inner {
         let hud_gpu = self.vr_ui
             && !self.vr_menu
             && batches.iter().any(|b| {
-                b.state.target == self.gs.main_fbp
+                b.state.target == scene.main_fbp
                     && b.tag.hud
                     && b.gpu.is_some()
                     && self.opts.keeps_post(b.tag.post)
@@ -1900,7 +1895,7 @@ impl Inner {
                             .is_some_and(|g| g.program == ssx3_render::gpu::Program::Mat6Shadow)
                     })
                     .map(|b| b.state.target)
-                    .filter(|&t| t != self.gs.main_fbp)
+                    .filter(|&t| t != scene.main_fbp)
                     .collect()
             } else {
                 Default::default()
@@ -1962,7 +1957,7 @@ impl Inner {
         let time = self.t0.elapsed().as_secs_f32();
         for (bi, b) in batches.iter().enumerate() {
             let st = &b.state;
-            if st.target == self.gs.main_fbp {
+            if st.target == scene.main_fbp {
                 if self.vr_ui && !self.vr_menu && !b.tag.hud || self.vr_eye.is_some() && b.tag.hud {
                     continue;
                 }
@@ -2011,7 +2006,7 @@ impl Inner {
             // (`SSX3_SHADOW_SHOW=normals|sunlit`) only the lit terrain draws.
             let native_light = light.is_some() && !shadow::debug("baked");
             let lit_base = native_light
-                && st.target == self.gs.main_fbp
+                && st.target == scene.main_fbp
                 && !b.tag.hud
                 && b.tag.post.is_none()
                 && b.gpu
@@ -2027,7 +2022,7 @@ impl Inner {
             let black = native_light
                 && shadow::show() == 9.0
                 && !lit_base
-                && st.target == self.gs.main_fbp
+                && st.target == scene.main_fbp
                 && b.tag.post.is_none()
                 && !b
                     .gpu
@@ -2037,7 +2032,7 @@ impl Inner {
                     || (shadow::fitting_view()
                         && !lit_base
                         && !black
-                        && st.target == self.gs.main_fbp))
+                        && st.target == scene.main_fbp))
             {
                 continue;
             }
@@ -2097,7 +2092,7 @@ impl Inner {
                             128,
                         ),
                         Some(t) if t & gs::ZFOG_TEX != 0 => {
-                            (self.clut_texture(t & !gs::ZFOG_TEX), 255)
+                            (self.clut_texture(scene, t & !gs::ZFOG_TEX), 255)
                         }
                         Some(info) => {
                             if dbg.texlog == Some(self.stats.frames) {
@@ -2124,7 +2119,7 @@ impl Inner {
             };
             // Logical (GS pixel) size of the target; the GPU target is
             // `scale` times that.
-            let (tw, th) = if st.target == self.gs.main_fbp {
+            let (tw, th) = if st.target == scene.main_fbp {
                 (w, h)
             } else {
                 match self
@@ -2145,14 +2140,14 @@ impl Inner {
                 ((sc >> 48) & 0x7ff) as u32,
             );
             // In target pixels.
-            let (fx, fy) = if st.target == self.gs.main_fbp {
+            let (fx, fy) = if st.target == scene.main_fbp {
                 self.fxy
             } else {
                 self.rt_fxy(st.target)
             };
             let px = |v: u32, f: f32| (v as f32 * f).round() as u32;
             let vr_world = self.vr_eye.is_some()
-                && st.target == self.gs.main_fbp
+                && st.target == scene.main_fbp
                 && !b.tag.hud
                 && !b.tag.screen
                 && b.tag.post.is_none();
@@ -2232,10 +2227,10 @@ impl Inner {
             let rt_psm = st
                 .tex
                 .filter(|t| *t != gs::FRAME_TEX && t & gs::RT_TEX != 0)
-                .and_then(|t| self.gs.rts.get(&(t & !gs::RT_TEX)))
+                .and_then(|t| scene.rts.get(&(t & !gs::RT_TEX)))
                 .map(|r| r.psm);
             // DATE on the main target (render targets: not yet).
-            let date = (st.ctx.test >> 14) & 1 != 0 && st.target == self.gs.main_fbp;
+            let date = (st.ctx.test >> 14) & 1 != 0 && st.target == scene.main_fbp;
             let zfog = st.tex.is_some_and(|t| {
                 t != gs::FRAME_TEX && t & gs::RT_TEX == 0 && t & gs::ZFOG_TEX != 0
             });
@@ -2291,7 +2286,7 @@ impl Inner {
                 if lit_base {
                     p.u.flags |= 16384;
                 } else if native_light
-                    && st.target == self.gs.main_fbp
+                    && st.target == scene.main_fbp
                     && !b.tag.hud
                     && b.tag.post.is_none()
                     && b.gpu
@@ -2305,7 +2300,7 @@ impl Inner {
                     // neutral (flag 65536).
                     p.u.flags |= 65536;
                 } else if native_light
-                    && st.target == self.gs.main_fbp
+                    && st.target == scene.main_fbp
                     && !b.tag.hud
                     && b.tag.post.is_none()
                     && b.gpu
@@ -2322,14 +2317,14 @@ impl Inner {
                     p.u.flags |= 32768;
                 } else if light.is_some()
                     && !shadow::debug("no-recv")
-                    && st.target == self.gs.main_fbp
+                    && st.target == scene.main_fbp
                     && !b.tag.hud
                     && b.tag.post.is_none()
                     && b.gpu.is_some_and(|g| shadow::receives(g.program))
                 {
                     p.u.flags |= 4096;
                 }
-                if shadow::debug("recvlog") && st.target == self.gs.main_fbp && !b.tag.hud {
+                if shadow::debug("recvlog") && st.target == scene.main_fbp && !b.tag.hud {
                     eprintln!(
                         "[recv] {:?} alpha {:#x} abe {} src_mode {} cs {} {} flags {:#x} tex {}",
                         b.gpu.map(|g| g.program),
@@ -2349,7 +2344,7 @@ impl Inner {
                 if zfog {
                     p.u.flags |= 256;
                     // Depth is stored as Z / (ZMAX + 1).
-                    p.u.pad[0] = match (self.gs.ctx[0].zbuf >> 24) & 15 {
+                    p.u.pad[0] = match (scene.ctx[0].zbuf >> 24) & 15 {
                         0 => 4294967296.0,
                         1 => 16777216.0,
                         _ => 65536.0,
@@ -2593,7 +2588,7 @@ impl Inner {
         let cv = t.color.create_view(&Default::default());
         let dv = t.depth.create_view(&Default::default());
         let mut enc = self.dev.create_command_encoder(&Default::default());
-        let main = self.gs.main_fbp;
+        let main = scene.main_fbp;
         // The sun map uses the game's unchanged chase camera and this
         // frame's shared geometry. Once the first VR eye has drawn it, the
         // second eye and tracked-view refreshes can sample the same map.
@@ -2824,7 +2819,7 @@ impl Inner {
                     if let (Some(l), Some(sh), Some(cam), true) = (
                         light.as_ref(),
                         self.shadow.as_ref(),
-                        self.gs.cam.as_ref(),
+                        scene.cam.as_ref(),
                         post::debug_view() != 0.0,
                     ) {
                         po.shadow(
@@ -2844,7 +2839,7 @@ impl Inner {
                             &self.queue,
                             &mut enc,
                             &post_frame,
-                            self.gs.cam.as_ref(),
+                            scene.cam.as_ref(),
                             self.fxy,
                         );
                     }
@@ -3063,7 +3058,7 @@ impl Inner {
                 if let (Some(l), Some(sh), Some(cam), true) = (
                     light.as_ref(),
                     self.shadow.as_ref(),
-                    self.gs.cam.as_ref(),
+                    scene.cam.as_ref(),
                     post::debug_view() != 0.0,
                 ) {
                     po.shadow(
@@ -3083,7 +3078,7 @@ impl Inner {
                         &self.queue,
                         &mut enc,
                         &post_frame,
-                        self.gs.cam.as_ref(),
+                        scene.cam.as_ref(),
                         self.fxy,
                     );
                 }

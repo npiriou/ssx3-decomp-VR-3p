@@ -231,6 +231,23 @@ pub struct FrameGeometry {
     pub verts: Vec<Vtx>,
     pub batches: Vec<Batch>,
     pub gpu: GpuFrame,
+    pub state: FrameState,
+}
+
+/// GS values consumed while drawing a prepared frame. Register carry stays
+/// in `Gs` for the next native frame; the eye renderer reads this snapshot.
+#[derive(Default)]
+pub struct FrameState {
+    pub size: (u32, u32),
+    pub main_fbp: u32,
+    pub ctx: [Ctx; 2],
+    pub rts: std::collections::HashMap<u32, Rt>,
+    pub cam: Option<Cam>,
+    pub key_light: [f32; 3],
+    pub key_ambient: [f32; 3],
+    pub key_colour: [f32; 3],
+    pub key_count: u32,
+    pub fog_cluts: Vec<Upload>,
 }
 
 /// Vertex data that is the same every frame (`GpuCall::mesh_key`), kept on
@@ -401,6 +418,18 @@ impl Gs {
             verts: std::mem::take(&mut self.verts),
             batches: std::mem::take(&mut self.batches),
             gpu,
+            state: FrameState {
+                size: self.size,
+                main_fbp: self.main_fbp,
+                ctx: self.ctx,
+                rts: self.rts.clone(),
+                cam: self.cam,
+                key_light: self.key_light,
+                key_ambient: self.key_ambient,
+                key_colour: self.key_colour,
+                key_count: self.key_count,
+                fog_cluts: std::mem::take(&mut self.fog_cluts),
+            },
         }
     }
 
@@ -408,6 +437,7 @@ impl Gs {
         self.verts = geometry.verts;
         self.batches = geometry.batches;
         self.gpu = geometry.gpu;
+        self.fog_cluts = geometry.state.fog_cluts;
     }
 
     /// Start a frame: drop the previous frame's geometry.
@@ -1396,6 +1426,19 @@ mod tests {
         let mut gs = Gs::new();
         gs.begin((640, 448), 0x80, 0xe0);
         gs.tex_map.insert(7, 11);
+        gs.ctx[0].zbuf = 0x1234;
+        gs.rts.insert(
+            0x90,
+            Rt {
+                w: 128,
+                h: 64,
+                psm: 0,
+            },
+        );
+        gs.fog_cluts.push(Upload {
+            data: vec![0x1020_3040],
+            ..Default::default()
+        });
         gs.verts.push(Vtx {
             pos: [1.0, 2.0, 0.5],
             ..Default::default()
@@ -1407,7 +1450,13 @@ mod tests {
         let geometry = gs.take_geometry();
         assert_eq!(geometry.verts.len(), 1);
         assert_eq!(geometry.gpu.data, [[1, 2, 3, 4]]);
+        assert_eq!(geometry.state.size, (640, 448));
+        assert_eq!(geometry.state.main_fbp, 0x80);
+        assert_eq!(geometry.state.ctx[0].zbuf, 0x1234);
+        assert_eq!(geometry.state.rts[&0x90].w, 128);
+        assert_eq!(geometry.state.fog_cluts[0].data, [0x1020_3040]);
         assert!(gs.verts.is_empty() && gs.gpu.data.is_empty());
+        assert!(gs.fog_cluts.is_empty());
         assert_eq!(gs.tex_map[&7], 11);
         assert!(std::sync::Arc::ptr_eq(&arena, &geometry.gpu.arena));
         assert!(std::sync::Arc::ptr_eq(&arena, &gs.gpu.arena));
@@ -1417,6 +1466,7 @@ mod tests {
         assert!(gs.verts.is_empty() && gs.gpu.data.is_empty());
         assert_eq!(gs.gpu.arena.lock().unwrap().data[0], [5, 6, 7, 8]);
         assert_eq!(gs.tex_map[&7], 11);
+        assert_eq!(gs.rts[&0x90].h, 64);
     }
 
     /// One A+D GIF packet writing `regs` in order.

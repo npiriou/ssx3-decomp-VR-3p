@@ -667,10 +667,18 @@ the preceding renderer pixel-for-pixel; a 1024×768 desktop image also
 matches. A muted 650-tick offline run with a 90° turn completed a retained
 scene refresh, kept both eyes filled and distinct, and measured 60.6 game
 ticks/s and 59.9 fresh stereo images/s over frames 420–650. This is a
-single offline run, not a sustained headset-rate result. The eye draw still
-reads mutable GS carry for textures, light and target state and takes the
-renderer lock. Capturing that remaining state in an immutable prepared scene
-is required before preparation and OpenXR eye rendering can overlap.
+single offline run, not a sustained headset-rate result. The next cut
+captures the GS camera, frame size, target map, context registers, light
+values and fog palettes with the detached geometry. `draw_built` now has no
+direct reads from the mutable `Gs` carry. Frozen Gravitude forward and +90°
+stereo eyes, and the desktop image, still match the preceding renderer pixel
+for pixel; all 31 graphics library tests pass. A first muted offline run of
+this cut completed 650 ticks with both eyes filled and distinct. Two muted
+offline runs measured 51.0 and 59.1 fresh stereo images/s over frames
+420–650, showing run-to-run variation. The renderer's own
+per-frame state, frame-memory snapshot, texture cache and queue still need
+explicit ownership and GPU completion fences before preparation and OpenXR
+eye rendering can overlap. The 60 fresh stereo/s target remains open.
 
 The frame stream is stateful. VIF/GS carry, texture uploads, and other
 resource changes must be consumed in order even when the headset renders the
