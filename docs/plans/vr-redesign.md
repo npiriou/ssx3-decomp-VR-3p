@@ -203,6 +203,20 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   texture IDs and VU calls. A `SSX3_GFX_SKIP` search pointed at draw 42,
   but that draw is a five-qword DIRECT state packet, so skipping it is not
   valid visual attribution.
+- A renderer-only type-1 grid refinement trial reconstructed the VU call's
+  4/6/8-point rows, sampled a cubic surface at twice the grid intervals,
+  and carried both texture passes onto the denser strips. Original grid
+  sites and second-pass UVs were preserved in a unit test. On Gravitude
+  frame 1000, refining draw 237 made the close wall only slightly less
+  faceted; its stretched 128×128 texture remained prominent. Refining all
+  type-1 terrain in a frozen 1920-square stereo side replay raised steady
+  render time from 19.13 to 27.74 ms per frame (16 repeats); refining only
+  draw 237 took 20.81 ms. Both eyes stayed filled, but the broad material
+  seams remained. The trial was removed rather than made a VR default.
+  The next terrain path should use the original power-basis coefficients
+  available in the Nash patch data, then choose density from screen error
+  and preserve matching samples on neighbouring edges. It must fit the
+  stereo frame budget and keep the game's 4/6/8 guest grid unchanged.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it
