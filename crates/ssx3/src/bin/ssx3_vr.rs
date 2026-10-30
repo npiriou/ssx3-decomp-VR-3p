@@ -16,7 +16,7 @@ use ssx3_vr::openxr as xr;
 use ssx3_vr::xr_wgpu;
 use ssx3_vr::xr_wgpu_session::{self, StereoTarget, VIEW_TYPE};
 
-const STAGE_NAMES: [&str; 11] = [
+const STAGE_NAMES: [&str; 12] = [
     "xr_wait",
     "xr_begin",
     "gfx_lock",
@@ -28,6 +28,7 @@ const STAGE_NAMES: [&str; 11] = [
     "xr_end",
     "view_refresh",
     "eye_pose_lag_deg",
+    "gaze_visibility_wait",
 ];
 
 /// Short-window CPU timings. Queue wait includes GPU work submitted before
@@ -85,6 +86,20 @@ struct GameProgress {
     tick_us: AtomicU64,
     status: Mutex<String>,
     error: Mutex<Option<String>>,
+}
+
+/// Wait for the renderer to publish the specific Nash visibility generation.
+/// Waiting for its queue to become empty can starve while the 60 Hz game
+/// keeps publishing frames.
+fn wait_for_gaze_frame(gfx: &ssx3_gfx::Renderer, generation: u64, timeout: Duration) -> bool {
+    let started = Instant::now();
+    while gfx.present_vr_visibility_epoch() < generation {
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_micros(500));
+    }
+    true
 }
 
 /// The EE machine is created and stays on this thread. It publishes one
@@ -447,6 +462,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut requested_exit = false;
     let mut anchor: Option<vr_camera::Anchor> = None;
     let mut current_eyes: Option<[ssx3_gfx::vr::Eye; 2]> = None;
+    let mut gaze_generation = 0u64;
+    let mut last_gaze_waited = 0u64;
     let mut pose_history = vr_camera::PoseHistory::default();
     let mut pose_misses = 0u64;
     let units_per_metre = vr_units_per_metre();
@@ -513,7 +530,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             let eyes = anchor.and_then(|a| a.eyes(&views, units_per_metre));
             if let Some(eyes) = eyes {
                 let view = &eyes[0].view_from_game;
-                ssx3_game::game::main::ssxapp::set_vr_gaze([view[0][2], view[1][2], view[2][2]]);
+                gaze_generation = ssx3_game::game::main::ssxapp::set_vr_gaze([
+                    view[0][2], view[1][2], view[2][2],
+                ]);
                 pose_history.record(eyes, &views);
             }
             current_eyes = eyes;
@@ -526,9 +545,24 @@ fn run() -> Result<(), Box<dyn Error>> {
         if game_worker.thread.as_ref().is_some_and(|t| t.is_finished()) {
             return Err("VR game worker stopped unexpectedly".into());
         }
-        // Redraw the retained scene between ticks when possible. A large
-        // head turn waits for the current render so the old gaze is not
-        // presented as a new view; ordinary motion stays nonblocking.
+        // A large turn can reveal course patches Nash culled for the old
+        // gaze. Wait for its rendered frame before redrawing the retained
+        // scene. Ordinary motion stays nonblocking.
+        let visibility_jump = current_eyes
+            .zip(gfx.present_vr_eyes())
+            .is_some_and(|(now, drawn)| vr_camera::large_pose_jump(now, drawn));
+        if visibility_jump
+            && gaze_generation > last_gaze_waited
+            && gfx.present_vr_visibility_epoch() < gaze_generation
+        {
+            last_gaze_waited = gaze_generation;
+            let wait_start = Instant::now();
+            if !wait_for_gaze_frame(&gfx, gaze_generation, Duration::from_millis(45)) {
+                eprintln!("[vr] new gaze visibility not ready within 45 ms");
+            }
+            stages.elapsed(11, wait_start);
+        }
+        let visibility_ready = gfx.present_vr_visibility_epoch() >= gaze_generation;
         let image_serial = gfx.present_serial();
         let image_eyes = gfx.present_vr_eyes();
         let large_jump = current_eyes
@@ -539,6 +573,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             && current_eyes.is_some_and(|eyes| {
                 image_eyes.is_none_or(|drawn| vr_camera::eyes_moved(eyes, drawn, units_per_metre))
                     && (image_serial == last_present_serial || large_jump)
+                    && (!large_jump || visibility_ready)
             })
         {
             let refresh_start = Instant::now();
@@ -687,7 +722,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         }
     });
     gfx.set_vr_eyes(Some(eyes));
-    ssx3_game::game::main::ssxapp::set_vr_gaze([0.0, 0.0, 1.0]);
+    let mut gaze_generation = ssx3_game::game::main::ssxapp::set_vr_gaze([0.0, 0.0, 1.0]);
     ssx3_ps2::machine::set_realtime(true);
     worker.start()?;
     worker.progress.running.store(true, Ordering::Release);
@@ -700,6 +735,10 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     let mut fresh = 0u64;
     let mut refreshes = 0u64;
     let mut refresh_ms = 0.0;
+    let mut gaze_waits = 0u64;
+    let mut gaze_wait_ms = 0.0;
+    let mut gaze_wait_misses = 0u64;
+    let mut last_gaze_waited = 0u64;
     let mut lock_ms = 0.0;
     let mut gpu_wait_ms = 0.0;
     let mut pending_max = 0usize;
@@ -742,7 +781,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                 eye.view_from_game[2] = [-s, 0.0, c, 0.0];
             }
             gfx.set_vr_eyes(Some(eyes));
-            ssx3_game::game::main::ssxapp::set_vr_gaze([s, 0.0, c]);
+            gaze_generation = ssx3_game::game::main::ssxapp::set_vr_gaze([s, 0.0, c]);
             turned = true;
         }
         let now = Instant::now();
@@ -752,11 +791,30 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         std::thread::sleep(next.saturating_duration_since(now));
         next += period;
         pending_max = pending_max.max(gfx.pending_frames());
+        let visibility_jump = gfx
+            .present_vr_eyes()
+            .is_some_and(|drawn| vr_camera::large_pose_jump(eyes, drawn));
+        if visibility_jump
+            && gaze_generation > last_gaze_waited
+            && gfx.present_vr_visibility_epoch() < gaze_generation
+        {
+            last_gaze_waited = gaze_generation;
+            let wait_start = Instant::now();
+            gaze_waits += 1;
+            gaze_wait_misses += u64::from(!wait_for_gaze_frame(
+                &gfx,
+                gaze_generation,
+                Duration::from_millis(45),
+            ));
+            gaze_wait_ms += wait_start.elapsed().as_secs_f64() * 1000.0;
+        }
+        let visibility_ready = gfx.present_vr_visibility_epoch() >= gaze_generation;
         let image_serial = gfx.present_serial();
         let image_eyes = gfx.present_vr_eyes();
         let large_jump = image_eyes.is_some_and(|drawn| vr_camera::large_pose_jump(eyes, drawn));
         if image_eyes.is_none_or(|drawn| vr_camera::eyes_moved(eyes, drawn, units_per_metre))
             && (image_serial == last_serial || large_jump)
+            && (!large_jump || visibility_ready)
         {
             let t = Instant::now();
             refreshes += u64::from(if large_jump {
@@ -818,13 +876,20 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             .map_err(|_| "Offline VR game worker panicked")?;
     }
     gfx.flush();
+    if std::env::var_os("SSX3_FRAME_DUMP").is_some() {
+        if let Some(prefix) = std::env::var_os("SSX3_VR_OFFLINE_SAVE") {
+            let dir = format!("{}-dump", prefix.to_string_lossy());
+            std::fs::create_dir_all(&dir)?;
+            ssx3_ps2::frame_sink::write_dumps(&dir)?;
+        }
+    }
     let frames = worker.progress.frames.load(Ordering::Acquire);
     let elapsed = started.elapsed().as_secs_f64();
     let images = gfx.stats().frames;
     let game_ms = worker.progress.tick_us.load(Ordering::Relaxed) as f64 / 1000.0;
     let status = worker.progress.status.lock().unwrap().clone();
     println!(
-        "offline VR pipeline: game {frames} ticks ({:.1}/s, {:.1}ms CPU/tick), renderer {images} frames, presented {submitted} stereo ({:.1}/s), fresh {fresh} ({:.1}/s), {}x{} per eye, {:.2}s; refresh {refreshes} ({:.1}ms total), lock {:.1}ms, GPU wait {:.1}ms, pending max {pending_max}, status {status:?}",
+        "offline VR pipeline: game {frames} ticks ({:.1}/s, {:.1}ms CPU/tick), renderer {images} frames, presented {submitted} stereo ({:.1}/s), fresh {fresh} ({:.1}/s), {}x{} per eye, {:.2}s; refresh {refreshes} ({:.1}ms total), gaze waits {gaze_waits} ({gaze_wait_ms:.1}ms, {gaze_wait_misses} misses), lock {:.1}ms, GPU wait {:.1}ms, pending max {pending_max}, status {status:?}",
         frames as f64 / elapsed,
         game_ms / frames.max(1) as f64,
         submitted as f64 / elapsed,
@@ -874,6 +939,17 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             return Err("Offline retained-scene head refresh failed".into());
         }
         let [left, right] = gfx.read_stereo_images().ok_or("No offline stereo image")?;
+        if let Some(prefix) = std::env::var_os("SSX3_VR_OFFLINE_SAVE") {
+            let prefix = prefix.to_string_lossy();
+            std::fs::write(
+                format!("{prefix}-world-left.png"),
+                png::encode(left.0, left.1, &left.2),
+            )?;
+            std::fs::write(
+                format!("{prefix}-world-right.png"),
+                png::encode(right.0, right.1, &right.2),
+            )?;
+        }
         let nonblack = |pixels: &[u32]| pixels.iter().filter(|&&p| p & 0x00ff_ffff != 0).count();
         let left_nonblack = nonblack(&left.2);
         let right_nonblack = nonblack(&right.2);

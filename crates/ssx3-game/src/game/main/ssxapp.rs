@@ -2176,15 +2176,33 @@ fn nash_eye_center(mut read: impl FnMut(u32) -> u32, matrix: u32) -> Option<[f32
     eye.iter().all(|v| v.is_finite()).then_some(eye)
 }
 
-static VR_GAZE: std::sync::Mutex<Option<[f32; 3]>> = std::sync::Mutex::new(None);
+// Generation changes only after five degrees of movement. Nash still uses
+// the latest direction every tick, while small tracked pose noise cannot
+// make the presenter wait for a new course selection every OpenXR frame.
+static VR_GAZE: std::sync::Mutex<(u64, Option<[f32; 3]>, Option<[f32; 3]>)> =
+    std::sync::Mutex::new((0, None, None));
 
 /// Camera-relative direction in which the headset is looking. This affects
 /// visual publication only; it never changes the game's chase camera.
-pub fn set_vr_gaze(direction: [f32; 3]) {
+pub fn set_vr_gaze(direction: [f32; 3]) -> u64 {
     let length = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let mut gaze = VR_GAZE.lock().unwrap();
     if length.is_finite() && length > 0.001 {
-        *VR_GAZE.lock().unwrap() = Some(direction.map(|v| v / length));
+        let direction = direction.map(|v| v / length);
+        if gaze.2.is_none_or(|prior| {
+            prior
+                .iter()
+                .zip(direction)
+                .map(|(a, b)| *a * b)
+                .sum::<f32>()
+                < 0.996_194_7
+        }) {
+            gaze.0 = gaze.0.saturating_add(1);
+            gaze.2 = Some(direction);
+        }
+        gaze.1 = Some(direction);
     }
+    gaze.0
 }
 
 fn nash_world_gaze(
@@ -2275,7 +2293,7 @@ fn nash_expand_vr_visibility(c: &mut Cpu, this: u32, roots: u32) -> u32 {
     let Some(eye) = nash_eye_center(|a| c.bus.read32(a), this + nash::WORLD_MATRIX) else {
         return 0;
     };
-    let gaze_camera = *VR_GAZE.lock().unwrap();
+    let (gaze_generation, gaze_camera, _) = *VR_GAZE.lock().unwrap();
     let gaze_camera = gaze_camera.or_else(|| {
         std::env::var("SSX3_VR_TEST_YAW")
             .ok()
@@ -2339,6 +2357,7 @@ fn nash_expand_vr_visibility(c: &mut Cpu, this: u32, roots: u32) -> u32 {
         }
     }
     c.bus.write32(this + nash::PARTIAL_COUNT, kept);
+    ssx3_render::vr_visibility::set_epoch(gaze_generation);
     count - initial
 }
 

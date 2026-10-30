@@ -51,6 +51,8 @@ struct Sink {
 /// the guest memory its renderer reads.
 pub struct Published {
     pub gm: u32,
+    /// Head-gaze generation whose Nash course visibility this frame contains.
+    pub vr_visibility_epoch: u64,
     pub built: Built,
     pub carry: Carry,
     pub mem: FrameMem,
@@ -379,6 +381,7 @@ pub fn on_signal_sema(c: &mut Cpu, id: i32) {
     }
     s.sink.frame(Published {
         gm: g,
+        vr_visibility_epoch: ssx3_render::vr_visibility::epoch(),
         built,
         carry,
         mem: fm,

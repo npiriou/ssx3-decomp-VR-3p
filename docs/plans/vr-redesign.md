@@ -620,10 +620,38 @@ at frames 500, 1000 and 1500 show no streak. At frame 1500, the 1920-square
 rear eyes each have all 3,686,400 pixels nonblack and differ at 3,102,443
 pixels. The lower 324 rows of the 1024-square rear view are pixel-identical
 to the old path, so this change did not alter the visible course. Forward
-and side stereo captures are filled and distinct. Frame 1000 still shows
-small detached geometry near the rear horizon; G1 remains open. Live headset
-quality and sustained pacing are unverified. A 512-square desktop frame is
-byte-identical with the switch on and off.
+and side stereo captures are filled and distinct. A frame-1000 forward-gaze
+dump viewed from behind showed detached terrain near the rear horizon; a
+rear-gaze dump from the same point filled that region. The issue was the
+published scene's visibility selection after a head turn. G1 remains open.
+Live headset quality and sustained pacing are unverified. A 512-square
+desktop frame is byte-identical with the switch on and off.
+
+### Live rear visibility and cached sky (2026-10-31)
+
+Nash now tags each published visual frame with the head-gaze generation it
+used. After a large head turn, the VR presenter waits briefly for that
+specific generation before refreshing its retained scene; a timeout keeps
+the previous image rather than presenting old forward-cull geometry as the
+new rear view. Small pose changes continue without this wait. A muted
+1920-square ARA1 offline run turning 180 degrees at frame 990 reached the
+rear course scene without the detached geometry seen in the forward-gaze
+dump. A second muted run at the same resolution measured 60.0 game ticks/s,
+59.6 fresh stereo images/s over race frames 420–1006, and one 21.2 ms gaze
+wait with no miss. This short offline capture does not establish headset
+frame pacing.
+
+The same live run exposed a second issue that frozen replays had hidden:
+after the VU/GS mesh cache warms, the sky calls omit their static vertex
+payload. The VR panorama builder required that payload and drew no dome,
+leaving the rear sky at the renderer clear colour. It now recovers those
+vertices from the existing GS mesh arena before rebuilding the panorama.
+If recovery fails, the original sky calls draw as a limited fallback. In
+a muted 1920-square live capture at frame 1005, both rear world eyes are
+fully covered (3,686,400 nonblack pixels each), differ at 3,091,043 pixels,
+and sample blue sky at the upper centre. This verifies stereo output for
+that scene; G1 coverage on other courses and G3 sustained SteamVR pacing
+remain open.
 
 ## Product contract
 

@@ -68,6 +68,40 @@ pub fn reproject(eye: Eye, game_projection: [[f32; 4]; 4]) -> Option<[[f32; 4]; 
     ))
 }
 
+/// VU1 omits static mesh inputs on later frames once the GS arena holds
+/// them. VR sky reconstruction still needs the original vertices, so recover
+/// a whole cached Mat3 mesh before remapping it around the tracked view.
+pub fn restore_cached_sky_mesh(
+    call: &mut ssx3_render::gpu::GpuCall,
+    arena: &crate::gs::MeshArena,
+) -> bool {
+    if !call.data.is_empty() {
+        return true;
+    }
+    if call.program != ssx3_render::gpu::Program::Mat3Mesh || call.split.is_some() {
+        return false;
+    }
+    let Some((start, _)) = call.mesh_key.and_then(|key| arena.at.get(&key)) else {
+        return false;
+    };
+    let count = call.uniforms[4][1] as usize;
+    if count == 0 || count > 4096 {
+        return false;
+    }
+    let start = *start as usize;
+    let Some(end) = count
+        .checked_mul(4)
+        .and_then(|size| start.checked_add(size))
+    else {
+        return false;
+    };
+    let Some(data) = arena.data.get(start..end) else {
+        return false;
+    };
+    call.data.extend_from_slice(data);
+    true
+}
+
 /// Extend the original sky's blue dome below its artist-authored horizon.
 /// SSX 3 only needed its narrow chase-camera view: the native blue dome
 /// stops above the mountain skirt, leaving a band exposed by a sideways VR
@@ -695,6 +729,36 @@ mod tests {
             eye[0] / eye[3]
         };
         assert!(x(100.0).abs() > x(1000.0).abs() * 9.0);
+    }
+
+    #[test]
+    fn cached_sky_mesh_restores_the_original_vertex_records() {
+        use ssx3_render::gpu::{GpuCall, Link, Program, UNIFORM_QWORDS};
+        let source: Vec<[u32; 4]> = (1..=8).map(|value| [value; 4]).collect();
+        let mut arena = crate::gs::MeshArena::default();
+        arena.data.push([99; 4]);
+        arena.data.extend_from_slice(&source);
+        arena.at.insert(7, (1, 128.0));
+        let mut call = GpuCall {
+            program: Program::Mat3Mesh,
+            pre: Vec::new(),
+            tag: 0,
+            uniforms: [[0; 4]; UNIFORM_QWORDS],
+            data: Vec::new(),
+            indices: Vec::new(),
+            index_mode: 0,
+            alpha_max: 128.0,
+            link: Link::None,
+            split: None,
+            mesh_key: Some(7),
+        };
+        call.uniforms[4][1] = 2;
+        assert!(restore_cached_sky_mesh(&mut call, &arena));
+        assert_eq!(call.data, source);
+        call.data.clear();
+        call.mesh_key = Some(8);
+        assert!(!restore_cached_sky_mesh(&mut call, &arena));
+        assert!(call.data.is_empty());
     }
 
     #[test]

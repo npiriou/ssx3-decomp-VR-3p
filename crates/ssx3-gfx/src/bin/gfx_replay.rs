@@ -441,6 +441,7 @@ fn main() {
                 ssx3_render::frame::texture_ranges(mem, &built.frame, &mut ranges);
                 let published = frame_sink::Published {
                     gm: built.frame.gm,
+                    vr_visibility_epoch: 0,
                     built,
                     carry: carry.clone(),
                     mem: frame_sink::FrameMem::from_ram(&mem.ram, &ranges),
@@ -485,10 +486,20 @@ fn main() {
                 "SSX3_VR_REPLAY_REFRESH: look-side, look-side-stereo, look-left or look-back"
             ),
         };
+        let yaw = std::env::var("SSX3_VR_REPLAY_REFRESH_YAW_DEG")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(yaw);
         let (s, c) = yaw.to_radians().sin_cos();
         let mut view = ssx3_gfx::vr::IDENTITY;
         view[0] = [c, 0.0, s, 0.0];
         view[2] = [-s, 0.0, c, 0.0];
+        view[3][0] = std::env::var("SSX3_VR_REPLAY_REFRESH_OFFSET")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0);
         let eye = ssx3_gfx::vr::Eye {
             view_from_game: view,
             projection: ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0),

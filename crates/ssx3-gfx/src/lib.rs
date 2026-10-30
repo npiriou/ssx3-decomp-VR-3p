@@ -264,6 +264,8 @@ pub struct Shared {
     present_eyes: Mutex<Option<[vr::Eye; 2]>>,
     /// Increments after a complete image set is published or reprojected.
     present_serial: std::sync::atomic::AtomicU64,
+    /// Nash visibility generation of the latest fully rendered game scene.
+    present_vr_visibility_epoch: std::sync::atomic::AtomicU64,
     ui_present: Mutex<Option<wgpu::Texture>>,
     vr_eyes: Mutex<Option<[vr::Eye; 2]>>,
 }
@@ -469,6 +471,12 @@ impl Renderer {
     pub fn present_serial(&self) -> u64 {
         self.1
             .present_serial
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn present_vr_visibility_epoch(&self) -> u64 {
+        self.1
+            .present_vr_visibility_epoch
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -1360,6 +1368,7 @@ impl Inner {
     /// Consume a published frame, retaining its texture-page snapshot only
     /// when it has a perspective VR scene that can be viewed again.
     fn render_published(&mut self, f: Job) {
+        let visibility_epoch = f.vr_visibility_epoch;
         self.render_built(&f.built, &f.carry, &f.mem);
         if let Some((geometry, inputs)) = self.vr_pending_scene.take() {
             self.vr_last_scene = Some(RetainedVrScene {
@@ -1368,6 +1377,9 @@ impl Inner {
                 inputs,
             });
         }
+        self.shared
+            .present_vr_visibility_epoch
+            .store(visibility_epoch, std::sync::atomic::Ordering::Release);
     }
 
     /// Render a frame.
@@ -3666,6 +3678,10 @@ impl Build {
         } else {
             0
         };
+        let sky_trace = std::env::var("SSX3_VR_SKY_TRACE_FROM")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|from| b.stats.frames >= from);
         // The PATH3 chains (GifBuff), one per phase, kicked with PATH3
         // masked (the kick thread writes MSKPATH3 1 into the VIF1 FIFO
         // first). As on the GS (`ssx3_ps2::gs::Mtgs::set_path3_mask`), each
@@ -4022,6 +4038,14 @@ impl Build {
                                             })
                                     });
                                 for mut c in g {
+                                    if vr_sky_dome
+                                        && matches!(owner, Owner::Payload(index) if *index < sky_draws)
+                                        && c.data.is_empty()
+                                        && c.mesh_key.is_some()
+                                    {
+                                        let arena = b.gs.gpu.arena.lock().unwrap();
+                                        vr::restore_cached_sky_mesh(&mut c, &arena);
+                                    }
                                     if let Some(index) = rock_draw {
                                         rock_hits +=
                                             usize::from(b.mesh_geometry.transform(index, &mut c));
@@ -4260,6 +4284,16 @@ impl Build {
                     _ => {}
                 }
                 if Some(i) == sky_last {
+                    if sky_trace {
+                        eprintln!(
+                            "[vr-sky] frame {} sky draws {} calls {} panorama {} textures {:?}",
+                            b.stats.frames,
+                            sky_draws,
+                            sky_dome_calls.len(),
+                            panorama_sky,
+                            draws.iter().take(8).map(|d| d.tex[0]).collect::<Vec<_>>()
+                        );
+                    }
                     let complete = if panorama_sky
                         || ridge_panorama
                         || city_panorama
@@ -4267,12 +4301,29 @@ impl Build {
                         || gravitude_panorama
                         || wrapped_sky
                     {
-                        if let Some(sphere) =
-                            vr::sky_dome_background(&sky_dome_calls, clean_snow_polar)
-                        {
-                            b.gs.gpu_draw(sphere);
+                        let sphere = vr::sky_dome_background(&sky_dome_calls, clean_snow_polar);
+                        if sky_trace {
+                            eprintln!(
+                                "[vr-sky] background {} inputs {:?}",
+                                sphere.is_some(),
+                                sky_dome_calls
+                                    .iter()
+                                    .map(|call| (call.program, call.data.len(), call.uniforms[4]))
+                                    .collect::<Vec<_>>()
+                            );
                         }
-                        true
+                        if let Some(sphere) = sphere {
+                            b.gs.gpu_draw(sphere);
+                            true
+                        } else {
+                            // A cache miss must not turn the whole sky into
+                            // the clear colour. The native dome still covers
+                            // the directions for which the game drew it.
+                            for call in &sky_dome_calls {
+                                b.gs.gpu_draw(call.clone());
+                            }
+                            false
+                        }
                     } else if sphere_sky {
                         if let Some(sphere) = vr::sky_dome_background(&sky_dome_calls, false) {
                             b.gs.gpu_draw(sphere);
