@@ -904,6 +904,7 @@
 0x00351508    IntersectInfo_GetDuration
 0x00352aa8    ModifierBlock_ctor
 0x00353ac0    SkyBox_ctor
+0x00353b10    SkyBox_Render
 0x00353da8    FlexBridge_SpringsCtor
 0x00354c08    ProcessList_Add
 0x00354e48    ProcessList_Remove
