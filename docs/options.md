@@ -57,6 +57,7 @@ its GPU work. It excludes OpenXR swapchain and headset compositor time.
 | `SSX3_VR_SKY_INTIMIDATOR_PANO=0` | Disable Intimidator's VR sky reconstruction (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_GRAVITUDE_PANO=0` | Disable Gravitude's VR sky reconstruction (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_WRAP=1` | Enable the earlier experimental Ruthless Ridge sky-panel wrap for comparison; also set `SSX3_VR_SKY_RIDGE_PANO=0`. |
+| `SSX3_VR_SKY_TRACE_FROM=<frame>` | From this renderer frame onward, log the native sky texture sequence and the VR sky mode actually selected (`snow`, `ridge`, `city`, `intimidator`, `gravitude`, `wrapped-ridge`, `sphere` or `native`). Useful when a course changes visible sky panels during a race. |
 | `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
 | `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
 | `SSX3_VR_INSPECT_DRAW=<index>` | With `gfx_replay`, log a frame draw's material, texture IDs and VU/DIRECT calls; use with `SSX3_GFX_PROBE=x,y` to trace a pixel back to its draw and GPU call. |

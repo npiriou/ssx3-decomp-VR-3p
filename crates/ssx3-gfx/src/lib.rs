@@ -4365,12 +4365,29 @@ impl Build {
                 }
                 if Some(i) == sky_last {
                     if sky_trace {
+                        let mode = if panorama_sky {
+                            "snow"
+                        } else if ridge_panorama {
+                            "ridge"
+                        } else if city_panorama {
+                            "city"
+                        } else if intimidator_panorama {
+                            "intimidator"
+                        } else if gravitude_panorama {
+                            "gravitude"
+                        } else if wrapped_sky {
+                            "wrapped-ridge"
+                        } else if sphere_sky {
+                            "sphere"
+                        } else {
+                            "native"
+                        };
                         eprintln!(
-                            "[vr-sky] frame {} sky draws {} calls {} panorama {} textures {:?}",
+                            "[vr-sky] frame {} sky draws {} calls {} mode {} textures {:?}",
                             b.stats.frames,
                             sky_draws,
                             sky_dome_calls.len(),
-                            panorama_sky,
+                            mode,
                             draws.iter().take(8).map(|d| d.tex[0]).collect::<Vec<_>>()
                         );
                     }

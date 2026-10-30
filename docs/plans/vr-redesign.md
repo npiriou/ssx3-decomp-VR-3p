@@ -748,6 +748,27 @@ legible in the live side capture. The close terrain's source detail and
 some far backdrop textures remain coarse; G1/G4 and sustained headset
 pacing remain open.
 
+### Live side coverage on the remaining race courses (2026-10-31)
+
+Muted 1920-square-per-eye +90° runs through game tick 651 on DRA4
+(Intimidator) and CRA3 (Ruthless Ridge) retained full nonblack coverage in
+both eyes and distinct stereo images. Over race frames 420–651, both runs
+measured 59.4 fresh stereo images/s, with one successful gaze-generation
+wait and no miss. Intimidator used its validated eight-texture panorama.
+Ruthless Ridge used its panorama with an eighth visible panel, texture 510;
+the new sky trace names the selected mode rather than reporting only the
+Snow Jam flag. A frozen replay confirmed `ridge` and `city` modes for those
+courses' live texture sequences.
+
+The large flat-looking mountain at the left of the Ridge side view is its
+six-vertex upper panorama strip. The source 256x128 texture contains both
+the purple sky and the mountain. Removing that draw removes 91,895 pixels
+of the backdrop in a 1024-square replay and leaves an empty-looking dome.
+A top-edge fade changed the join only slightly and was reverted. The
+remaining close snow and rock quality is a source-geometry/material issue;
+the panorama guard is active here. Neither run validates sustained OpenXR
+pacing in the headset.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase
