@@ -30,6 +30,8 @@ against a simulated 72 Hz presenter, without SteamVR. It mutes audio and
 reports game, stereo presentation and fresh stereo rates after race frame 420.
 Set `SSX3_VR_OFFLINE_TURN_AT=450` and optionally
 `SSX3_VR_OFFLINE_TURN_DEG=90` to simulate a head turn during that run.
+`SSX3_VR_OFFLINE_SWEEP_DPS=<degrees/s>` makes that turn continuous and
+reports the angular gap between the requested and rendered eye pose.
 Set `SSX3_VR_OFFLINE_SAVE=<prefix>` with a turn to save the final composited
 `<prefix>-left.png` and `<prefix>-right.png` for visual review. The offline
 mode uses the same UI dimensions and world-unit setting as the live VR mode.

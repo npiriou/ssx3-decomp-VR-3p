@@ -1,7 +1,47 @@
 //! OpenXR eye poses relative to the game's moving chase camera.
 
+use std::collections::VecDeque;
+
 use ssx3_gfx::vr::{self, Eye};
 use ssx3_vr::openxr as xr;
+
+/// Relates an eye pair actually drawn by the game renderer to the OpenXR
+/// tracking poses used to construct it. The compositor needs the *rendered*
+/// pose for its own late reprojection, even if a newer tracking sample has
+/// arrived before this image is submitted.
+#[derive(Default)]
+pub struct PoseHistory {
+    samples: VecDeque<([Eye; 2], [xr::View; 2])>,
+}
+
+impl PoseHistory {
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+
+    pub fn record(&mut self, eyes: [Eye; 2], views: &[xr::View]) {
+        if views.len() != 2 {
+            return;
+        }
+        self.samples
+            .push_back((eyes, [views[0].clone(), views[1].clone()]));
+        if self.samples.len() > 32 {
+            self.samples.pop_front();
+        }
+    }
+
+    pub fn views_for(&self, drawn: [Eye; 2]) -> Option<&[xr::View; 2]> {
+        self.samples
+            .iter()
+            .rev()
+            .find(|(eyes, _)| {
+                eyes.iter().zip(drawn).all(|(a, b)| {
+                    a.view_from_game == b.view_from_game && a.projection == b.projection
+                })
+            })
+            .map(|(_, views)| views)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct Anchor {
@@ -69,6 +109,14 @@ pub fn eyes_moved(now: [Eye; 2], shown: [Eye; 2], units_per_metre: f32) -> bool 
             || (0..4)
                 .any(|c| (0..4).any(|r| (a.projection[c][r] - b.projection[c][r]).abs() > 0.0001))
     })
+}
+
+/// Angular gap between a tracked eye and the pose that actually drew it.
+pub fn rotation_delta_deg(now: Eye, drawn: Eye) -> f32 {
+    let trace = (0..3)
+        .flat_map(|c| (0..3).map(move |r| now.view_from_game[c][r] * drawn.view_from_game[c][r]))
+        .sum::<f32>();
+    ((trace - 1.0) * 0.5).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
 impl Anchor {
@@ -190,5 +238,47 @@ mod tests {
         let mut turned = eye;
         turned.view_from_game[0][2] = 0.01;
         assert!(eyes_moved([turned; 2], [eye; 2], 100.0));
+    }
+
+    #[test]
+    fn reports_rendered_head_rotation_error() {
+        let eye = Eye {
+            view_from_game: vr::IDENTITY,
+            projection: vr::IDENTITY,
+        };
+        let mut turned = eye;
+        turned.view_from_game[0] = [0.0, 0.0, 1.0, 0.0];
+        turned.view_from_game[2] = [-1.0, 0.0, 0.0, 0.0];
+        assert!(rotation_delta_deg(eye, eye) < 0.01);
+        assert!((rotation_delta_deg(eye, turned) - 90.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn history_returns_the_pose_that_drew_an_older_eye_pair() {
+        let mut history = PoseHistory::default();
+        let neutral = xr::View {
+            pose: xr::Posef::IDENTITY,
+            fov: xr::Fovf {
+                angle_left: -0.8,
+                angle_right: 0.8,
+                angle_up: 0.8,
+                angle_down: -0.8,
+            },
+        };
+        let mut turned = neutral;
+        turned.pose.orientation.y = 0.2;
+        turned.pose.orientation.w = (1.0 - 0.2f32 * 0.2).sqrt();
+        let anchor = Anchor::new(&[neutral, neutral]).unwrap();
+        let first = anchor.eyes(&[neutral, neutral], 100.0).unwrap();
+        let second = anchor.eyes(&[turned, turned], 100.0).unwrap();
+        history.record(first, &[neutral, neutral]);
+        history.record(second, &[turned, turned]);
+        assert_eq!(history.views_for(first).unwrap()[0].pose.orientation.y, 0.0);
+        assert_eq!(
+            history.views_for(second).unwrap()[0].pose.orientation.y,
+            0.2
+        );
+        history.clear();
+        assert!(history.views_for(first).is_none());
     }
 }

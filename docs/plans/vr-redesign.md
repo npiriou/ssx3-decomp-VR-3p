@@ -32,6 +32,17 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   OpenXR swapchain waits, frame submission and
   the headset compositor are absent, so headset pacing, comfort and the 60
   fresh images/s target remain unverified.
+- Each published stereo image now retains the eye transforms actually used
+  to draw it. The final HUD composition uses those transforms, and the
+  OpenXR projection layer submits their matching `xrLocateViews` pose/FOV
+  sample. Previously the layer could describe a newer headset pose than the
+  image, giving the runtime inconsistent inputs for reprojection while
+  turning. This follows
+  the [OpenXR projection-view contract](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrCompositionLayerProjectionView.html).
+  A synthetic 180° sweep at 30°/s on Gravitude frames 420–1001 kept 59.9
+  fresh stereo images/s; the gap between requested and drawn head rotation
+  was 0.50° at p95 and 0.69° maximum. A faster 90° turn at 180°/s reached
+  3.82° maximum. SteamVR's actual reprojection remains unmeasured.
 - Nash retains a headset-directed 75° cone of loaded patches and instances,
   plus nearby objects in every direction, before the game's destructive
   forward cull. Headless ARA1 captures at frames 500, 1000, 1500 confirm

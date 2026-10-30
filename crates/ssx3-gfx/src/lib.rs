@@ -195,6 +195,7 @@ pub struct Inner {
     ui_present: Option<wgpu::Texture>,
     /// Eye currently drawn, and game-clip to eye-clip transform.
     vr_eye: Option<(usize, [[f32; 4]; 4])>,
+    rendered_eyes: Option<[vr::Eye; 2]>,
     vr_reprojections: [Vec<Option<[[f32; 4]; 4]>>; 2],
     vr_ui: bool,
     vr_menu: bool,
@@ -241,6 +242,8 @@ pub struct Shared {
     /// The latest frame's images (in-between ones first) and when they
     /// were ready.
     present: Mutex<Option<(Vec<wgpu::Texture>, web_time::Instant)>>,
+    /// Tracked poses actually used to draw the published stereo image.
+    present_eyes: Mutex<Option<[vr::Eye; 2]>>,
     /// Increments after a complete image set is published or reprojected.
     present_serial: std::sync::atomic::AtomicU64,
     ui_present: Mutex<Option<wgpu::Texture>>,
@@ -362,6 +365,7 @@ impl Renderer {
                 present: Vec::new(),
                 ui_present: None,
                 vr_eye: None,
+                rendered_eyes: None,
                 vr_reprojections: std::array::from_fn(|_| Vec::new()),
                 vr_ui: false,
                 vr_menu: false,
@@ -451,6 +455,10 @@ impl Renderer {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub fn present_vr_eyes(&self) -> Option<[vr::Eye; 2]> {
+        *self.1.present_eyes.lock().unwrap()
+    }
+
     pub fn present_age_ms(&self) -> Option<f64> {
         let g = self.1.present.lock().unwrap();
         Some(g.as_ref()?.1.elapsed().as_secs_f64() * 1000.0)
@@ -517,25 +525,31 @@ impl Renderer {
             return false;
         }
         *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
+        *self.1.present_eyes.lock().unwrap() = g.rendered_eyes;
         self.1
             .present_serial
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         true
     }
 
-    /// Refresh the last completed scene only when the game worker has not
-    /// published a newer image. Unlike the explicit refresh above, this
-    /// cannot wait for a continuous stream of pending game ticks.
+    /// Refresh the last completed scene only when no newer image was
+    /// published. Leave immediately if the renderer or Vulkan queue is busy;
+    /// a queued game tick may then produce the next tracked image itself.
     pub fn refresh_vr_eyes_if_stale(&self, eyes: [vr::Eye; 2], serial: u64) -> bool {
-        let mut g = self.0.lock().unwrap();
-        if self.present_serial() != serial || *self.1.pending.lock().unwrap() != 0 {
+        let Ok(mut g) = self.0.try_lock() else {
+            return false;
+        };
+        if self.present_serial() != serial {
             return false;
         }
-        let _queue = self.1.queue_access.lock().unwrap();
-        if *self.1.pending.lock().unwrap() != 0 || !g.refresh_vr_eyes(eyes) {
+        let Ok(_queue) = self.1.queue_access.try_lock() else {
+            return false;
+        };
+        if !g.refresh_vr_eyes(eyes) {
             return false;
         }
         *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
+        *self.1.present_eyes.lock().unwrap() = g.rendered_eyes;
         self.1
             .present_serial
             .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -1101,6 +1115,7 @@ impl Inner {
         let _queue = self.render_one(built, mem, &access);
         *self.shared.present.lock().unwrap() =
             (!self.present.is_empty()).then(|| (self.present.clone(), web_time::Instant::now()));
+        *self.shared.present_eyes.lock().unwrap() = self.rendered_eyes;
         *self.shared.ui_present.lock().unwrap() = self.ui_present.clone();
         self.shared
             .present_serial
@@ -1137,6 +1152,7 @@ impl Inner {
         access: &'a Mutex<()>,
     ) -> std::sync::MutexGuard<'a, ()> {
         self.stats.frames += 1;
+        self.rendered_eyes = None;
         self.vr_last_published = None;
         self.vr_last_batches = None;
         let t_start = web_time::Instant::now();
@@ -1198,6 +1214,7 @@ impl Inner {
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
                 self.vr_ui = false;
                 self.vr_last_batches = Some(batches);
+                self.rendered_eyes = Some(eyes);
                 return queue;
             }
         }
@@ -1257,6 +1274,9 @@ impl Inner {
         }
         self.vr_last_batches = Some(batches);
         self.vr_last_published = Some(f);
+        if fallback.is_some() {
+            self.rendered_eyes = Some(eyes);
+        }
         fallback.is_some()
     }
 
