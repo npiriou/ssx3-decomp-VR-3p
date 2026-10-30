@@ -186,6 +186,15 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   producer can run near 60 Hz offline. The OpenXR blit, compositor, headset
   pacing and queue synchronization are absent; the live target remains
   unverified.
+  A trial of generating mipmaps for the original one-level textures did not
+  materially improve the close-course appearance in 1920-square eye captures.
+  In a 10-repeat frozen-frame comparison, ARA1 changed about 280,000 of
+  3,686,400 pixels and its render time went from 14.16 to 16.25 ms; DRA4
+  changed about 6,500 pixels and went from 14.44 to 13.92 ms. These timings
+  are noisy and the visual gain was too small to justify the extra texture
+  preparation, so the experiment was removed. The coarse close surfaces need
+  separate geometry and source-texture inspection rather than a global mip
+  switch.
 
 Keep headset review behind the remaining G1 coverage and G3 pacing work.
 All game captures in this investigation used `SSX3_AUDIO=0`.
