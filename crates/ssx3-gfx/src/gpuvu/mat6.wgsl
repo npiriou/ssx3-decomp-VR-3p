@@ -99,6 +99,13 @@ fn mat6_skin_vertex(vi: u32, c: u32) -> VOut {
     let off = m6(b + 12u);
     let hc = mat6_snap(vec4<f32>(off.xyz * clip.w + scale.xyz * clip.xyz, clip.w));
     var o = gs_vertex(c, hc, clip.z, false, col, vec3<f32>(st * q, q));
+    if (vr_enabled() && !SHADOW_PASS) {
+        // Keep skinned riders' texture perspective tied to the tracked eye,
+        // as for native Mat3 meshes and Bezier terrain.
+        let eye_q = 1.0 / o.pos.w;
+        let tex_scale = fq(c, 29u);
+        o.stq = vec3<f32>(st.x * tex_scale.x * eye_q, st.y * tex_scale.y * eye_q, eye_q);
+    }
     // Real-time lighting: the smooth world normal (the flat faces' normals
     // turn a low-poly rider's terminator into a patchwork of self-shadowed
     // triangles): the point one unit along the model normal, through the

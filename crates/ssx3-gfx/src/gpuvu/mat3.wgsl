@@ -51,6 +51,14 @@ fn mat3_mesh_vertex(vi: u32, c: u32) -> VOut {
         stq = vec3<f32>(t, 1.0);
     }
     var o = gs_vertex(c, hc, cz, rd(base + 3u).x != 0u, col, stq);
+    if (vr_enabled() && uq(c, 4).w < 2u) {
+        // Native meshes are now rasterized from the tracked eye. Their GS
+        // STQ was divided by the old game camera's w, which stretches the
+        // texture when the headset looks sideways or behind the rider.
+        let eye_q = 1.0 / o.pos.w;
+        let tex_scale = fq(c, 29u);
+        o.stq = vec3<f32>(t.x * tex_scale.x * eye_q, t.y * tex_scale.y * eye_q, eye_q);
+    }
     if (camera_sky) {
         // The synthetic panorama's q0-3 are the game's projection, and its
         // vertices are in camera space. Reproject them directly into this

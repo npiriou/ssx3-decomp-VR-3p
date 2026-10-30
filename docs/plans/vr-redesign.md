@@ -710,8 +710,8 @@ A muted 1920-square live capture of BRA2 through game tick 650 exposed a
 sequence the frozen frame-500 survey missed. The first five sky textures
 were unchanged, but the visible sequence ended at texture 423 after seven
 sky draws. A later frame dump had eight sky draws ending 425, 424, 423.
-The VR skyline guard
-only accepted the earlier eight-draw sequence ending 425, 423, 422, so the
+The VR skyline guard only accepted the earlier eight-draw sequence ending
+425, 423, 422, so the
 live view used the original forward-camera sky panels at side angles.
 The guard now accepts the observed seven- and eight-draw variants and
 reconstructs them from the original native mesh and textures. A live +90°
@@ -721,11 +721,32 @@ lower course image virtually identical. A 180° capture still fills all
 Race frames 420–650 measured 59.8 game ticks/s and 59.8 fresh stereo
 images/s in the rear run. All 34 `ssx3-gfx` unit tests pass.
 
-The large close building in the +90° image remains visually distorted.
-A frame-650 pixel probe identifies it as a native matrix-1 General/Mat3Mesh
-course draw (draw 128, texture 349), separate from the sky. This is still
-G1/G4 work; the sky fix does not solve the close-object geometry or the
-stretched snow texture in the rear view. Headset pacing remains unverified.
+The large close building in the +90° image still appeared distorted after
+the sky fix. A frame-650 pixel probe identified it as a native matrix-1
+General/Mat3Mesh course draw (draw 128, texture 349), separate from the sky.
+The rear snow also appeared stretched. Headset pacing remains unverified.
+
+### Tracked-eye texture perspective (2026-10-31)
+
+The Mat3 VU shader projected native object vertices into the tracked eye
+but still divided their texture coordinates by the original game camera's
+homogeneous w. At Metro City's side angle, that factor changes abruptly
+across the nearby building and turns its window texture into long blurred
+bands. The Bezier terrain shader already uses the tracked eye's w in VR.
+Mat3 native meshes now do the same; synthetic sky meshes retain their own
+UV rule. A frozen BRA2 frame-650 +90° before/after shows separate window
+rows on the building instead of the bands. The desktop PNG is byte-identical.
+The same correction was applied to skinned rider textures. On a frozen ARA1
+25° head turn, it changes 630 pixels, mostly on riders; a forward view and
+the desktop output stay byte-identical.
+
+Muted live runs at 1920 square per eye completed through BRA2 frame 651
+(+90°), ARA1 frame 1006 (180°), and ERA5 frame 650 (+90°). Their race
+intervals measured 59.2, 59.7 and 59.5 fresh stereo images/s, respectively;
+both eyes stayed distinct, with no gaze miss. The Metro City façade is
+legible in the live side capture. The close terrain's source detail and
+some far backdrop textures remain coarse; G1/G4 and sustained headset
+pacing remain open.
 
 ## Product contract
 
