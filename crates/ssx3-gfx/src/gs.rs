@@ -223,6 +223,16 @@ pub struct GpuFrame {
     pub arena: std::sync::Arc<std::sync::Mutex<MeshArena>>,
 }
 
+/// Draw input owned by one published frame. The GS register and texture
+/// carry stays in `Gs`; geometry and its ordered batches move into the scene
+/// consumed by the two eye renders. The mesh arena is still shared carry.
+#[derive(Default)]
+pub struct FrameGeometry {
+    pub verts: Vec<Vtx>,
+    pub batches: Vec<Batch>,
+    pub gpu: GpuFrame,
+}
+
 /// Vertex data that is the same every frame (`GpuCall::mesh_key`), kept on
 /// the GPU: the host copy of the arena and where each key's data sits.
 /// Shared by the frame's `Gs` copies; the renderer uploads what is new.
@@ -381,6 +391,23 @@ impl Gs {
             prmodecont: 1,
             ..Gs::default()
         }
+    }
+
+    pub fn take_geometry(&mut self) -> FrameGeometry {
+        let gpu = std::mem::take(&mut self.gpu);
+        // Static source meshes remain shared with the next GS frame.
+        self.gpu.arena = gpu.arena.clone();
+        FrameGeometry {
+            verts: std::mem::take(&mut self.verts),
+            batches: std::mem::take(&mut self.batches),
+            gpu,
+        }
+    }
+
+    pub fn reuse_geometry_storage(&mut self, geometry: FrameGeometry) {
+        self.verts = geometry.verts;
+        self.batches = geometry.batches;
+        self.gpu = geometry.gpu;
     }
 
     /// Start a frame: drop the previous frame's geometry.
@@ -1363,6 +1390,34 @@ impl Gs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_frame_geometry_keeps_gs_carry_and_mesh_arena() {
+        let mut gs = Gs::new();
+        gs.begin((640, 448), 0x80, 0xe0);
+        gs.tex_map.insert(7, 11);
+        gs.verts.push(Vtx {
+            pos: [1.0, 2.0, 0.5],
+            ..Default::default()
+        });
+        gs.gpu.data.push([1, 2, 3, 4]);
+        gs.gpu.arena.lock().unwrap().data.push([5, 6, 7, 8]);
+        let arena = gs.gpu.arena.clone();
+
+        let geometry = gs.take_geometry();
+        assert_eq!(geometry.verts.len(), 1);
+        assert_eq!(geometry.gpu.data, [[1, 2, 3, 4]]);
+        assert!(gs.verts.is_empty() && gs.gpu.data.is_empty());
+        assert_eq!(gs.tex_map[&7], 11);
+        assert!(std::sync::Arc::ptr_eq(&arena, &geometry.gpu.arena));
+        assert!(std::sync::Arc::ptr_eq(&arena, &gs.gpu.arena));
+
+        gs.reuse_geometry_storage(geometry);
+        gs.begin((640, 448), 0x80, 0xe0);
+        assert!(gs.verts.is_empty() && gs.gpu.data.is_empty());
+        assert_eq!(gs.gpu.arena.lock().unwrap().data[0], [5, 6, 7, 8]);
+        assert_eq!(gs.tex_map[&7], 11);
+    }
 
     /// One A+D GIF packet writing `regs` in order.
     fn ad(regs: &[(u32, u64)]) -> Vec<u128> {

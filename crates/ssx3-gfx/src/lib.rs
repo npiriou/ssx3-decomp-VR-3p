@@ -203,11 +203,11 @@ pub struct Inner {
     vr_reprojections: [Vec<Option<[[f32; 4]; 4]>>; 2],
     vr_ui: bool,
     vr_menu: bool,
-    /// Last fully built VR scene. The worker owns its memory snapshot until
-    /// the next game frame, allowing a new tracked view without replaying
-    /// stateful VIF/GS commands.
-    vr_last_published: Option<Job>,
-    vr_last_batches: Option<Vec<gs::Batch>>,
+    /// The latest published VR scene and its detached draw geometry.
+    vr_last_scene: Option<RetainedVrScene>,
+    /// Geometry just rendered, before `render_published` attaches its memory
+    /// snapshot. Direct frame replays recycle it at the next frame instead.
+    vr_pending_geometry: Option<gs::FrameGeometry>,
     /// Vertex and uniform buffers, kept across frames (grown as needed).
     vbuf: Option<wgpu::Buffer>,
     ubuf: Option<wgpu::Buffer>,
@@ -225,6 +225,11 @@ pub struct Renderer(pub Arc<Mutex<Inner>>, Arc<Shared>);
 
 /// A frame handed to the render thread.
 type Job = ssx3_ps2::frame_sink::Published;
+
+struct RetainedVrScene {
+    published: Job,
+    geometry: gs::FrameGeometry,
+}
 
 /// What the render thread shares with the game and the window without
 /// holding the renderer: the latest depth for the light queries and the
@@ -377,8 +382,8 @@ impl Renderer {
                 vr_reprojections: std::array::from_fn(|_| Vec::new()),
                 vr_ui: false,
                 vr_menu: false,
-                vr_last_published: None,
-                vr_last_batches: None,
+                vr_last_scene: None,
+                vr_pending_geometry: None,
                 staged: None,
                 vbuf: None,
                 gbuf: [None, None, None, None],
@@ -1353,8 +1358,11 @@ impl Inner {
     /// when it has a perspective VR scene that can be viewed again.
     fn render_published(&mut self, f: Job) {
         self.render_built(&f.built, &f.carry, &f.mem);
-        if self.vr_last_batches.is_some() {
-            self.vr_last_published = Some(f);
+        if let Some(geometry) = self.vr_pending_geometry.take() {
+            self.vr_last_scene = Some(RetainedVrScene {
+                published: f,
+                geometry,
+            });
         }
     }
 
@@ -1406,8 +1414,14 @@ impl Inner {
     ) -> std::sync::MutexGuard<'a, ()> {
         self.stats.frames += 1;
         self.rendered_eyes = None;
-        self.vr_last_published = None;
-        self.vr_last_batches = None;
+        let recycled = self
+            .vr_pending_geometry
+            .take()
+            .or_else(|| self.vr_last_scene.take().map(|scene| scene.geometry));
+        self.vr_last_scene = None;
+        if let Some(geometry) = recycled {
+            self.gs.reuse_geometry_storage(geometry);
+        }
         let t_start = web_time::Instant::now();
         let mut b = self.take_build();
         self.world_casters = built.casters.clone();
@@ -1417,9 +1431,9 @@ impl Inner {
         Build::run(&mut b, built, mem, eyes);
         self.put_build(b);
         self.timing.1[0] += t_start.elapsed().as_secs_f64() * 1e3;
-        // Build once, then draw the same triangles from each tracked eye.
-        // Taking the list here also leaves GS ready for the next game frame.
-        let batches = std::mem::take(&mut self.gs.batches);
+        // Ordered GS state carries into the next game frame. The complete
+        // geometry belongs to this prepared scene and is shared by its eyes.
+        let geometry = self.gs.take_geometry();
         // The last perspective record is the active scene projection. The
         // first one may use a shorter near plane for sky/background draws.
         let source = built
@@ -1444,7 +1458,7 @@ impl Inner {
             ) {
                 for (index, reprojection) in [left, right].into_iter().enumerate() {
                     self.vr_eye = Some((index, reprojection));
-                    self.draw_built(mem, &batches, index != 0, false);
+                    self.draw_built(mem, &geometry, &geometry.batches, index != 0, false);
                 }
                 self.vr_eye = None;
                 // The spatial HUD pass reads only main-target HUD batches.
@@ -1454,7 +1468,8 @@ impl Inner {
                 // world batches, so keep its full input until that set is
                 // prepared separately from the HUD draw.
                 let hud_batches: Option<Vec<_>> = (!self.opts.shadows).then(|| {
-                    batches
+                    geometry
+                        .batches
                         .iter()
                         .filter(|b| b.state.target == self.gs.main_fbp && b.tag.hud)
                         .cloned()
@@ -1462,10 +1477,16 @@ impl Inner {
                 });
                 self.vr_ui = true;
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
-                self.draw_built(mem, hud_batches.as_deref().unwrap_or(&batches), true, false);
+                self.draw_built(
+                    mem,
+                    &geometry,
+                    hud_batches.as_deref().unwrap_or(&geometry.batches),
+                    true,
+                    false,
+                );
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
                 self.vr_ui = false;
-                self.vr_last_batches = Some(batches);
+                self.vr_pending_geometry = Some(geometry);
                 self.rendered_eyes = Some(eyes);
                 return queue;
             }
@@ -1477,7 +1498,7 @@ impl Inner {
             self.vr_ui = true;
             self.vr_menu = true;
             std::mem::swap(&mut self.targets, &mut self.ui_targets);
-            self.draw_built(mem, &batches, false, false);
+            self.draw_built(mem, &geometry, &geometry.batches, false, false);
             std::mem::swap(&mut self.targets, &mut self.ui_targets);
             self.vr_ui = false;
             self.vr_menu = false;
@@ -1488,22 +1509,21 @@ impl Inner {
                 .depthless_through
                 .store(self.frames_in, std::sync::atomic::Ordering::Release);
             self.shared.depth_ready.notify_all();
+            self.gs.reuse_geometry_storage(geometry);
             return queue;
         }
         self.ui_present = None;
-        self.draw_built(mem, &batches, false, false);
+        self.draw_built(mem, &geometry, &geometry.batches, false, false);
+        self.gs.reuse_geometry_storage(geometry);
         queue
     }
 
     fn refresh_vr_eyes(&mut self, eyes: [vr::Eye; 2]) -> bool {
-        let Some(f) = self.vr_last_published.take() else {
+        let Some(scene) = self.vr_last_scene.take() else {
             return false;
         };
-        let Some(batches) = self.vr_last_batches.take() else {
-            self.vr_last_published = Some(f);
-            return false;
-        };
-        let source = f
+        let source = scene
+            .published
             .built
             .frame
             .matrices
@@ -1518,7 +1538,9 @@ impl Inner {
         });
         if let Some(fallback) = fallback {
             self.vr_reprojections = eyes.map(|eye| {
-                f.built
+                scene
+                    .published
+                    .built
                     .frame
                     .matrices
                     .iter()
@@ -1527,12 +1549,17 @@ impl Inner {
             });
             for (index, matrix) in fallback.into_iter().enumerate() {
                 self.vr_eye = Some((index, matrix));
-                self.draw_built(&f.mem, &batches, true, true);
+                self.draw_built(
+                    &scene.published.mem,
+                    &scene.geometry,
+                    &scene.geometry.batches,
+                    true,
+                    true,
+                );
             }
             self.vr_eye = None;
         }
-        self.vr_last_batches = Some(batches);
-        self.vr_last_published = Some(f);
+        self.vr_last_scene = Some(scene);
         if fallback.is_some() {
             self.rendered_eyes = Some(eyes);
         }
@@ -1543,6 +1570,7 @@ impl Inner {
     fn draw_built(
         &mut self,
         mem: &dyn Mem,
+        geometry: &gs::FrameGeometry,
         batches: &[gs::Batch],
         reuse_scene_inputs: bool,
         view_only: bool,
@@ -1568,7 +1596,7 @@ impl Inner {
         self.stats.prims += self.gs.prims - p0.0;
         self.stats.dropped += self.gs.dropped - p0.1;
         self.stats.unknown_tex += self.gs.unknown_tex - p0.2;
-        if self.gs.verts.is_empty() && self.gs.gpu.calls.is_empty() {
+        if geometry.verts.is_empty() && geometry.gpu.calls.is_empty() {
             return;
         }
         // Vertex buffer.
@@ -1576,8 +1604,8 @@ impl Inner {
         // vertex layout's order; the slice covers exactly the vertices.
         let vbytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
-                self.gs.verts.as_ptr() as *const u8,
-                std::mem::size_of_val(&self.gs.verts[..]),
+                geometry.verts.as_ptr() as *const u8,
+                std::mem::size_of_val(&geometry.verts[..]),
             )
         };
         let upload_verts = !reuse_scene_inputs
@@ -1772,11 +1800,11 @@ impl Inner {
         let needs_gpu = if self.vr_ui && !self.vr_menu {
             hud_gpu
         } else {
-            !self.gs.gpu.calls.is_empty()
+            !geometry.gpu.calls.is_empty()
         };
         let mut gpu_bind_shadow = None;
         let gpu_bind = needs_gpu.then(|| {
-            let g = &self.gs.gpu;
+            let g = &geometry.gpu;
             // (u32 slices as their bytes, no copy: the GPU reads little-endian
             // words, as the targets store them.)
             fn bytes(w: &[u32]) -> &[u8] {
@@ -2159,7 +2187,7 @@ impl Inner {
                 if vr_snapshot_bounds && (st.ctx.test >> 14) & 1 != 0 {
                     match (b.gpu, reprojection) {
                         (None, Some(matrix)) => vr_cpu_bounds(
-                            &self.gs.verts[b.first as usize..(b.first + b.count) as usize],
+                            &geometry.verts[b.first as usize..(b.first + b.count) as usize],
                             matrix,
                             (w, h),
                         ),
@@ -2175,7 +2203,7 @@ impl Inner {
                 match b.gpu {
                     Some(g) => g.bounds,
                     None => Some(
-                        self.gs.verts[b.first as usize..(b.first + b.count) as usize]
+                        geometry.verts[b.first as usize..(b.first + b.count) as usize]
                             .iter()
                             .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |m, v| {
                                 [
@@ -2215,7 +2243,7 @@ impl Inner {
             // need care: see draw::plans).
             let av = match b.gpu {
                 Some(g) => g.alpha_max,
-                None => self.gs.verts[b.first as usize..(b.first + b.count) as usize]
+                None => geometry.verts[b.first as usize..(b.first + b.count) as usize]
                     .iter()
                     .fold(0f32, |m, v| m.max(v.col[3])),
             };
@@ -2378,8 +2406,8 @@ impl Inner {
                     let bezier_verts = b.gpu.and_then(|g| {
                         (g.program == ssx3_render::gpu::Program::Bezier)
                             .then(|| 1 + g.call as usize * 5 + 3)
-                            .and_then(|slot| self.gs.gpu.call_start.get(slot))
-                            .and_then(|&start| self.gs.gpu.calls.get(start as usize + 4 + 7))
+                            .and_then(|slot| geometry.gpu.call_start.get(slot))
+                            .and_then(|&start| geometry.gpu.calls.get(start as usize + 4 + 7))
                             .map(|info| info[2])
                     });
                     format!(

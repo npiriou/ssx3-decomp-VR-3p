@@ -656,6 +656,22 @@ needed by the tracked views. The native renderer and asset decoding remain
 the source; this is a renderer adaptation, not a new game engine. Classify
 published work as world, sky/effects, UI, and ordered resource updates.
 
+The first ownership cut is installed: `Gs::take_geometry` detaches the
+frame's CPU vertices, GPU source calls and ordered batches after the native
+VIF/GS build. Both eye draws read that geometry, and the published VR scene
+retains it with its frame-memory snapshot for a later head-pose refresh.
+The GS register/texture carry remains available for the next game tick, and
+the detached vector storage is recycled to avoid per-tick allocations. On
+Gravitude frame 650, frozen 1920-square forward and +90° stereo eyes match
+the preceding renderer pixel-for-pixel; a 1024×768 desktop image also
+matches. A muted 650-tick offline run with a 90° turn completed a retained
+scene refresh, kept both eyes filled and distinct, and measured 60.6 game
+ticks/s and 59.9 fresh stereo images/s over frames 420–650. This is a
+single offline run, not a sustained headset-rate result. The eye draw still
+reads mutable GS carry for textures, light and target state and takes the
+renderer lock. Capturing that remaining state in an immutable prepared scene
+is required before preparation and OpenXR eye rendering can overlap.
+
 The frame stream is stateful. VIF/GS carry, texture uploads, and other
 resource changes must be consumed in order even when the headset renders the
 latest of two prepared snapshots. A simple `latest frame wins` channel may
