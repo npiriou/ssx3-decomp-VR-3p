@@ -769,6 +769,32 @@ remaining close snow and rock quality is a source-geometry/material issue;
 the panorama guard is active here. Neither run validates sustained OpenXR
 pacing in the headset.
 
+### Event-mode stereo and Snow Jam sky variants (2026-10-31)
+
+Muted 1920-square-per-eye runs through tick 650 also covered Snow Jam
+slopestyle (`ASS1`), big air (`ABA1`), Metro City superpipe (`BHP1`), and
+Snow Jam backcountry (`ABC1:6`). At a +90° head turn, all four retained
+filled, distinct left/right world and composite eyes, with no gaze miss.
+Over race frames 420–650, the initial runs measured 59.2, 59.1, 59.9 and
+59.9 fresh stereo images/s, respectively. Forward captures of slopestyle,
+big air and backcountry kept the rider and original challenge HUD within
+the central eye image. These are short offline runs, not headset pacing or
+comfort validation.
+
+The `ABA1` and `ASS1` side captures exposed large native sky-panel triangles.
+Their texture sequences are Snow Jam variants ending in `285,284,283` and
+`286,285,283`, while the race/backcountry panorama guard recognized only
+`286,285,284`. Exact sequence guards now select the existing Snow Jam
+panorama for these variants, preserving the prior seven-draw case. In the
+same `ABA1` side frame, the panorama changes 632,187 world-eye RGB pixels
+and removes the visible triangle without moving the terrain or trees. The
+`ASS1` side frame no longer has the large sky wedge; its two eyes stay fully
+filled and differ at 2,761,370 pixels. A forward `ABA1` capture retains the
+rider, score, timer and speed. An `ASS1` 180° capture also fills both eyes
+with course geometry and distinct stereo. All 34 `ssx3-gfx` tests pass.
+Far backdrop detail, full near/mid/far ±90°/rear coverage and sustained
+OpenXR pacing remain open.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

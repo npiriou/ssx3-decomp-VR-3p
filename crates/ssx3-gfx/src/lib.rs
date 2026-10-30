@@ -3841,14 +3841,22 @@ impl Build {
         let plan = Build::plan_vu_calls(b, built, &draws);
         let mut vu = VuReceiver::default();
         let mut sky_dome_calls = Vec::new();
-        // Snow Jam's panels have been checked against the VR panorama.
-        // Other courses share this geometry but use different texture
-        // layouts, so validate the complete native sequence before replacing it.
+        // Snow Jam's race, big-air and slopestyle panel sequences share the
+        // native sky mesh, but the last three visible sectors differ. Keep
+        // the guard exact so another course cannot inherit this panorama.
         let supported_panorama_sky = sky_draws >= 7
-            && [281, 289, 288, 287, 282, 286, 285]
+            && [281, 289, 288, 287, 282]
                 .into_iter()
                 .enumerate()
-                .all(|(n, texture)| draws[n].tex[0] == Some(texture));
+                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
+            && (sky_draws == 7 && [draws[5].tex[0], draws[6].tex[0]] == [Some(286), Some(285)]
+                || sky_draws >= 8
+                    && matches!(
+                        [draws[5].tex[0], draws[6].tex[0], draws[7].tex[0]],
+                        [Some(286), Some(285), Some(284)]
+                            | [Some(286), Some(285), Some(283)]
+                            | [Some(285), Some(284), Some(283)]
+                    ));
         let panorama_sky = vr_sky_dome
             && supported_panorama_sky
             && std::env::var("SSX3_VR_SKY_PANORAMA").map_or(true, |v| v != "0");
