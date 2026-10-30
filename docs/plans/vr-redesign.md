@@ -217,6 +217,28 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   available in the Nash patch data, then choose density from screen error
   and preserve matching samples on neighbouring edges. It must fit the
   stereo frame budget and keep the game's 4/6/8 guest grid unchanged.
+- The packetless terrain emitter now tags each VU draw with its source Nash
+  patch address, including the deferred type-1 groups. The frame builder
+  copies the 16 original power-basis coefficient vectors once per distinct
+  drawn patch when `SSX3_VR_TERRAIN_SOURCE=1` (the VR default). This host
+  metadata does not enter VU memory or change guest state. A new muted
+  Gravitude frame-1000 dump contained 392 distinct terrain sources;
+  `gfx_replay` found all 392 terrain draw calls tagged and an **exact**
+  match between the first VU grid position and coefficient C15 on every
+  one, with none missing. Frozen
+  512-square stereo images with source copying off/on had identical SHA-256
+  hashes in both eyes. In adjacent 500-frame headless runs the typed-frame
+  mean was 1.88/1.93 ms with copying off and 2.06 ms with copying on;
+  this is an approximate 0.13–0.18 ms cost, mixed with run variance.
+  A muted 1920-square Gravitude offline pipeline through frame 650, with
+  a 90° head turn at frame 500, measured 60.0 game ticks/s, 71.8 stereo
+  submissions/s and 59.5 fresh stereo images/s over frames 420–650 with
+  capture on; the adjacent capture-off run measured 60.0, 72.0 and 59.7.
+  Both retained stereo eyes were filled and distinct. These are offline
+  results and remain just under the 60 fresh-images/s headset gate.
+  The standard 6000-frame race replay RAM gate matches its baseline with
+  terrain-source copying both off and on.
+  The captured coefficients are not yet used to change the visible mesh.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it

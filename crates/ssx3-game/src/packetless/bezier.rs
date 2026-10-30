@@ -386,7 +386,14 @@ fn emit_type1(c: &mut Cpu, gm: u32, bm: u32, lod: u32, slot: i32, entry: u32, cu
     let e = mscal(c, table, 2 + flag);
     let start = r32(c, cursor);
     w32(c, cursor, start + 0x10);
-    record(start, Cmd::Vu(vec![Step::Chain(pkt), Step::Start(e)]));
+    record(
+        start,
+        Cmd::Vu(vec![
+            Step::Chain(pkt),
+            Step::TerrainPatch(patch),
+            Step::Start(e),
+        ]),
+    );
     add_record(c, gm, start, start, false);
     if shine {
         matrix_pass(
@@ -446,6 +453,7 @@ fn emit_type2(c: &mut Cpu, gm: u32, bm: u32, slot: i32, entry: u32, lods: u32, c
                 data: coeffs,
             },
             Step::Chain(pkt),
+            Step::TerrainPatch(patch),
             Step::Start(e),
         ]),
     );
@@ -604,10 +612,12 @@ fn flush_deferred(c: &mut Cpu, gm: u32, bm: u32, dm: u32, base: u32, matrix: u32
         let lod = r32(c, e + 4);
         let pkt = r32(c, e + 8);
         let entry = r32(c, e + 0xc);
+        let patch = r32(c, entry);
         let table = r32(c, LOD_TABLES + 4 * lod);
         let flag = r32(c, entry + 4);
         let ent = mscal(c, table, 2 + flag);
         steps.push(Step::Chain(pkt));
+        steps.push(Step::TerrainPatch(patch));
         steps.push(Step::Start(ent));
     }
     group(c, b, steps, cursor);

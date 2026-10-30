@@ -87,6 +87,9 @@ pub enum Step {
     Mask(u32),
     /// MSCAL.
     Start(u32),
+    /// Host-only source address for the terrain draw's next MSCAL. This
+    /// travels with the recorded packet; it changes no VIF or guest state.
+    TerrainPatch(u32),
     /// A CALL into a prebuilt chain (a model's mesh chain): played through
     /// the frame build's chain cache.
     Chain(u32),
@@ -335,6 +338,7 @@ pub fn encode_cmd(cmd: &Cmd, out: &mut Vec<u8>) {
                     Step::Mask(v) => (4, v),
                     Step::Start(v) => (5, v),
                     Step::Chain(v) => (6, v),
+                    Step::TerrainPatch(v) => (10, v),
                 };
                 out.push(k);
                 out.extend_from_slice(&v.to_le_bytes());
@@ -420,6 +424,7 @@ pub fn decode_cmd(r: &mut Bytes) -> Option<Cmd> {
                     4 => Step::Mask(r.u32()?),
                     5 => Step::Start(r.u32()?),
                     6 => Step::Chain(r.u32()?),
+                    10 => Step::TerrainPatch(r.u32()?),
                     7 => {
                         let k = r.u32()?;
                         let mut data = Vec::with_capacity(k as usize);
@@ -528,6 +533,7 @@ mod tests {
                     Step::Itop(1),
                     Step::Mode(0),
                     Step::Mask(7),
+                    Step::TerrainPatch(0x10_4000),
                     Step::Start(0x80),
                 ]),
             },

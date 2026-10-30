@@ -86,6 +86,9 @@ impl FrameBuilder {
         } else {
             frame::build_cached(mem, gm, &carry, &mut self.cache, direct)
         };
+        if std::env::var("SSX3_VR_TERRAIN_SOURCE").is_ok_and(|v| v == "1") {
+            b.capture_terrain_coeffs(mem);
+        }
         if ssx3_render::world_casters::enabled() {
             b.casters = self.casters.update(mem);
             b.sun = ssx3_render::world_casters::painter_sun(mem);
@@ -888,11 +891,15 @@ pub fn build_dump_cached(
     if g == 0 {
         return None;
     }
-    Some(if native_frame(&mem.direct) {
+    let mut built = if native_frame(&mem.direct) {
         frame::build_native(mem, g, carry, cache, mem.direct.clone())
     } else {
         frame::build_cached(mem, g, carry, cache, mem.direct.clone())
-    })
+    };
+    if std::env::var("SSX3_VR_TERRAIN_SOURCE").is_ok_and(|v| v == "1") {
+        built.capture_terrain_coeffs(mem);
+    }
+    Some(built)
 }
 
 /// Frames are built from the buckets and the captured draws without

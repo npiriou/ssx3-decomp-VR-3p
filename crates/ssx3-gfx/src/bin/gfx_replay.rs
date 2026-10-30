@@ -124,6 +124,66 @@ fn main() {
         for (i, (mem, carry)) in frames.iter().enumerate() {
             let t0 = std::time::Instant::now();
             let built = frame_sink::build_dump_cached(mem, carry, &mut chains).expect("no frame");
+            if std::env::var_os("SSX3_VR_TERRAIN_VALIDATE").is_some()
+                && i + 1 == frames.len()
+                && rep == 0
+            {
+                let mut total = 0usize;
+                let mut tagged = 0usize;
+                let mut exact = 0usize;
+                let mut missing = 0usize;
+                let draws: Vec<_> = built.frame.draws().collect();
+                for (owner, event) in &built.events {
+                    if !matches!(owner, ssx3_render::frame::Owner::Payload(n) if draws.get(*n).is_some_and(|d| matches!(d.state.material, ssx3_render::frame::Material::Bezier1 | ssx3_render::frame::Material::Bezier2)))
+                    {
+                        continue;
+                    }
+                    let ssx3_render::vif::Event::Call(call) = event else {
+                        continue;
+                    };
+                    if !matches!(
+                        call.entry,
+                        Some(
+                            0x0610
+                                | 0x0648
+                                | 0x0680
+                                | 0x06b8
+                                | 0x0700
+                                | 0x0748
+                                | 0x0790
+                                | 0x07d8
+                                | 0x0820
+                                | 0x09a0
+                                | 0x0a38
+                        )
+                    ) {
+                        continue;
+                    }
+                    total += 1;
+                    let Some(patch) = call.terrain_patch else {
+                        missing += 1;
+                        continue;
+                    };
+                    tagged += 1;
+                    let merged = call.merged_input();
+                    let Some((_, q)) = merged.iter().find(|(addr, _)| *addr as u32 == call.top)
+                    else {
+                        missing += 1;
+                        continue;
+                    };
+                    let Some(coeffs) = built.terrain_coeffs.get(&patch) else {
+                        missing += 1;
+                        continue;
+                    };
+                    if (0..3).all(|lane| (*q >> (32 * lane)) as u32 == coeffs[15][lane]) {
+                        exact += 1;
+                    }
+                }
+                eprintln!(
+                    "[vr-terrain] {} coefficient sets, {total} terrain calls, {tagged} tagged, {exact} exact grid corners, {missing} missing source/grid/corner",
+                    built.terrain_coeffs.len()
+                );
+            }
             if std::env::var_os("SSX3_VR_INSPECT_MATRICES").is_some()
                 && i + 1 == frames.len()
                 && rep == 0
@@ -167,6 +227,10 @@ fn main() {
                     .and_then(|value| value.parse::<usize>().ok())
                 {
                     if let Some(draw) = built.frame.draws().nth(index) {
+                        eprintln!(
+                            "[vr-draw] {} distinct terrain coefficient sets",
+                            built.terrain_coeffs.len()
+                        );
                         let calls: Vec<_> = built
                             .events
                             .iter()
@@ -176,7 +240,27 @@ fn main() {
                             })
                             .filter_map(|event| match event {
                                 ssx3_render::vif::Event::Call(call) => {
-                                    Some((call.entry, call.native, call.input.len()))
+                                    let corner = call
+                                        .terrain_patch
+                                        .and_then(|patch| built.terrain_coeffs.get(&patch))
+                                        .map(|coeffs| coeffs[15].map(f32::from_bits));
+                                    let grid_origin = call
+                                        .merged_input()
+                                        .iter()
+                                        .find(|(addr, _)| *addr as u32 == call.top)
+                                        .map(|(_, q)| {
+                                            std::array::from_fn::<_, 4, _>(|lane| {
+                                                f32::from_bits((*q >> (32 * lane)) as u32)
+                                            })
+                                        });
+                                    Some((
+                                        call.entry,
+                                        call.native,
+                                        call.input.len(),
+                                        call.terrain_patch,
+                                        corner,
+                                        grid_origin,
+                                    ))
                                 }
                                 _ => None,
                             })

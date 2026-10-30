@@ -726,6 +726,7 @@ pub(super) fn build(
         flip: super::flip_packet(m),
         casters: None,
         sun: None,
+        terrain_coeffs: HashMap::new(),
     }
 }
 

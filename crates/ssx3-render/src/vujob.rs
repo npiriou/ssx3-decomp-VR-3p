@@ -467,6 +467,7 @@ mod tests {
                     .collect(),
                 shared: (k == 1).then(|| vec![((next() % 1024) as u16, next() as u128)].into()),
                 src: (k == 3).then_some(42),
+                terrain_patch: None,
                 native: false,
             })
             .collect();
@@ -594,6 +595,7 @@ mod tests {
                 input: vec![(0x10 + k, 99)],
                 shared: Some(shared.clone()),
                 src: Some(5 << 16 | k as u64),
+                terrain_patch: None,
                 native: false,
             })
             .collect();

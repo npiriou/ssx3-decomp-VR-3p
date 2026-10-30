@@ -44,6 +44,9 @@ pub struct VuCall {
     /// time (a replayed mesh chain: [`Recording::id`] and the start's
     /// index), so its vertex data can stay on the GPU. Not part of equality.
     pub src: Option<u64>,
+    /// Guest address of the Bézier patch behind this native terrain draw.
+    /// Renderer metadata only; absent from decoded PS2 VIF streams.
+    pub terrain_patch: Option<u32>,
     /// Made from a captured command (`Vif1::native`), not decoded. Not part
     /// of equality.
     pub native: bool,
@@ -390,6 +393,7 @@ impl Vif1 {
     /// applied as its VIFcodes would be.
     pub fn native(&mut self, steps: &[crate::direct::Step]) {
         use crate::direct::Step;
+        let mut terrain_patch = None;
         for s in steps {
             match s {
                 Step::Write { addr, rel, data } => {
@@ -408,8 +412,10 @@ impl Vif1 {
                     self.call(Some(*e));
                     if let Some(Event::Call(c)) = self.events.last_mut() {
                         c.native = true;
+                        c.terrain_patch = terrain_patch.take();
                     }
                 }
+                Step::TerrainPatch(p) => terrain_patch = Some(*p),
                 // (The frame build plays chains: `frame::play_chain`.)
                 Step::Chain(_) => {}
                 Step::Gif(q) => self.push_event(Event::Direct(Direct {
@@ -468,6 +474,7 @@ impl Vif1 {
             input,
             shared: None,
             src: None,
+            terrain_patch: None,
             native: false,
         }));
     }
@@ -618,10 +625,35 @@ mod tests {
         };
         assert_eq!(c.entry, Some(0x200));
         assert_eq!(c.top, 0x10);
+        assert_eq!(c.terrain_patch, None);
         assert_eq!(
             c.input,
             vec![(0x10, q([1, 2, 3, 4])), (0x11, q([5, 6, 7, 8]))]
         );
         assert_eq!(v.regs.tops, 0x30);
+    }
+
+    #[test]
+    fn native_terrain_source_tracks_each_start_without_touching_vif_memory() {
+        use crate::direct::Step;
+        let mut v = Vif1::new(VifRegs::default());
+        let before = v.mem.clone();
+        v.native(&[
+            Step::TerrainPatch(0x10_4000),
+            Step::Start(0x0700),
+            Step::TerrainPatch(0x10_5000),
+            Step::Start(0x06b8),
+            Step::Start(0x0610),
+        ]);
+        let patches: Vec<_> = v
+            .events
+            .iter()
+            .map(|e| match e {
+                Event::Call(c) => c.terrain_patch,
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        assert_eq!(patches, [Some(0x10_4000), Some(0x10_5000), None]);
+        assert_eq!(v.mem[..], before[..]);
     }
 }

@@ -946,6 +946,32 @@ pub struct Built {
     pub casters: Option<std::sync::Arc<crate::world_casters::Casters>>,
     /// The world painter's sun (`crate::world_casters::painter_sun`).
     pub sun: Option<crate::world_casters::PainterSun>,
+    /// Original power-basis coefficients for terrain draws, keyed by patch
+    /// address. Captured on the game thread for renderer-only VR geometry.
+    pub terrain_coeffs: HashMap<u32, [[u32; 4]; 16]>,
+}
+
+impl Built {
+    /// Keep only coefficients referenced by this frame's native terrain
+    /// calls. The published renderer memory otherwise contains textures,
+    /// not the entire live Nash patch list.
+    pub fn capture_terrain_coeffs(&mut self, mem: &dyn Mem) {
+        for (_, event) in &self.events {
+            let Event::Call(call) = event else { continue };
+            let Some(patch) = call.terrain_patch else {
+                continue;
+            };
+            if !(0x10_0000..0x01ff_fec0).contains(&patch) || patch & 0xf != 0 {
+                continue;
+            }
+            self.terrain_coeffs.entry(patch).or_insert_with(|| {
+                std::array::from_fn(|i| {
+                    let q = mem.qword(patch + 0x40 + 16 * i as u32);
+                    std::array::from_fn(|lane| (q >> (32 * lane)) as u32)
+                })
+            });
+        }
+    }
 }
 
 /// Inputs carried from frame to frame.
@@ -2022,6 +2048,7 @@ pub fn build_cached(
         flip: flip_packet(m),
         casters: None,
         sun: None,
+        terrain_coeffs: HashMap::new(),
     }
 }
 

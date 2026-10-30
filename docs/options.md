@@ -60,6 +60,8 @@ its GPU work. It excludes OpenXR swapchain and headset compositor time.
 | `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
 | `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
 | `SSX3_VR_INSPECT_DRAW=<index>` | With `gfx_replay`, log a frame draw's material, texture IDs and VU/DIRECT calls; use with `SSX3_GFX_PROBE=x,y` to trace a pixel back to its draw and GPU call. |
+| `SSX3_VR_TERRAIN_SOURCE=0` | Skip VR-only copying of the original Bézier coefficients into published frames (enabled by the VR executable). The current image is unchanged either way. |
+| `SSX3_VR_TERRAIN_VALIDATE=1` | With `gfx_replay` and `SSX3_VR_TERRAIN_SOURCE=1`, count terrain calls whose VU grid corner exactly matches the recorded patch coefficients. |
 
 The current VR path is under redesign; `docs/plans/vr-redesign.md` tracks the remaining coverage and frame-rate gates. Mute game tests with `SSX3_AUDIO=0`.
 

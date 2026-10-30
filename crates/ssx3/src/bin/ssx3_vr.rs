@@ -291,6 +291,11 @@ fn configure_vr_game() {
     // Ask Nash to retain nearby world nodes in every head direction before
     // the typed frame is published. Desktop/headless runs keep their cull.
     std::env::set_var("SSX3_VR_VISIBILITY", "1");
+    // Retain the source coefficients of terrain actually drawn this frame
+    // for a future per-eye, screen-error-based mesh path.
+    if std::env::var_os("SSX3_VR_TERRAIN_SOURCE").is_none() {
+        std::env::set_var("SSX3_VR_TERRAIN_SOURCE", "1");
+    }
     // Ship the few hand-reconstructed close-view textures with the VR binary.
     // An explicit texture pack still overrides individual built-in images.
     if std::env::var_os("SSX3_VR_TEXTURES").is_none() {
