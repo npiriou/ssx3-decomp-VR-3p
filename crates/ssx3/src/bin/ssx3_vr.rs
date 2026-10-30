@@ -196,6 +196,8 @@ mod vr_camera;
 #[allow(dead_code)]
 #[path = "../game.rs"]
 mod game;
+#[path = "../png.rs"]
+mod png;
 #[allow(dead_code)]
 #[path = "../settings.rs"]
 mod settings;
@@ -303,6 +305,30 @@ fn configure_vr_game() {
     env_logger::init();
 }
 
+fn vr_units_per_metre() -> f32 {
+    std::env::var("SSX3_VR_UNITS_PER_M")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(100.0)
+}
+
+fn vr_panel_config(units_per_metre: f32) -> xr_wgpu_session::PanelConfig {
+    let ui_setting = |name: &str, default: f32, min: f32, max: f32| {
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && (min..=max).contains(v))
+            .unwrap_or(default)
+    };
+    xr_wgpu_session::PanelConfig {
+        width: ui_setting("SSX3_VR_UI_WIDTH_M", 1.3, 0.5, 3.0) * units_per_metre,
+        height: ui_setting("SSX3_VR_UI_HEIGHT_M", 1.3, 0.5, 3.0) * units_per_metre,
+        distance: ui_setting("SSX3_VR_UI_DISTANCE_M", 2.0, 1.0, 5.0) * units_per_metre,
+        y: ui_setting("SSX3_VR_UI_HEIGHT_OFFSET_M", 0.0, -1.0, 1.0) * units_per_metre,
+    }
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     configure_vr_game();
     let entry = ssx3_vr::load_entry()?;
@@ -383,24 +409,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut anchor: Option<vr_camera::Anchor> = None;
     let mut current_eyes: Option<[ssx3_gfx::vr::Eye; 2]> = None;
     let mut last_submitted_eyes: Option<[ssx3_gfx::vr::Eye; 2]> = None;
-    let units_per_metre = std::env::var("SSX3_VR_UNITS_PER_M")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(100.0);
-    let ui_setting = |name: &str, default: f32, min: f32, max: f32| {
-        std::env::var(name)
-            .ok()
-            .and_then(|s| s.parse::<f32>().ok())
-            .filter(|v| v.is_finite() && (min..=max).contains(v))
-            .unwrap_or(default)
-    };
-    let panel = xr_wgpu_session::PanelConfig {
-        width: ui_setting("SSX3_VR_UI_WIDTH_M", 1.3, 0.5, 3.0) * units_per_metre,
-        height: ui_setting("SSX3_VR_UI_HEIGHT_M", 1.3, 0.5, 3.0) * units_per_metre,
-        distance: ui_setting("SSX3_VR_UI_DISTANCE_M", 2.0, 1.0, 5.0) * units_per_metre,
-        y: ui_setting("SSX3_VR_UI_HEIGHT_OFFSET_M", 0.0, -1.0, 1.0) * units_per_metre,
-    };
+    let units_per_metre = vr_units_per_metre();
+    let panel = vr_panel_config(units_per_metre);
     eprintln!(
         "[vr] UI panel: {:.2}x{:.2}m at {:.2}m, height offset {:.2}m",
         panel.width / units_per_metre,
@@ -602,17 +612,13 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         .filter(|&v| (512..=3840).contains(&v))
         .unwrap_or(1024);
     let compositor = xr_wgpu_session::OfflineStereoTarget::new(&gpu.device, eye_size, eye_size);
-    let panel = xr_wgpu_session::PanelConfig {
-        width: 130.0,
-        height: 130.0,
-        distance: 200.0,
-        y: 0.0,
-    };
+    let units_per_metre = vr_units_per_metre();
+    let panel = vr_panel_config(units_per_metre);
     gfx.set_output_size(Some((eye_size, eye_size)));
     let projection = ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
     let mut eyes = std::array::from_fn(|i| {
         let mut view = ssx3_gfx::vr::IDENTITY;
-        view[3][0] = if i == 0 { 3.2 } else { -3.2 };
+        view[3][0] = (if i == 0 { 0.032 } else { -0.032 }) * units_per_metre;
         ssx3_gfx::vr::Eye {
             view_from_game: view,
             projection,
@@ -676,7 +682,8 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         pending_max = pending_max.max(gfx.pending_frames());
         if gfx.pending_frames() == 0
             && gfx.present_serial() == last_serial
-            && last_shown_eyes.is_none_or(|shown| vr_camera::eyes_moved(eyes, shown, 100.0))
+            && last_shown_eyes
+                .is_none_or(|shown| vr_camera::eyes_moved(eyes, shown, units_per_metre))
         {
             let t = Instant::now();
             refreshes += u64::from(gfx.refresh_vr_eyes_if_stale(eyes, last_serial));
@@ -823,10 +830,30 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             panel_eyes,
             panel,
         )?;
-        let (left, right, different, total) = compositor.eye_coverage(&gpu.device, &gpu.queue)?;
+        let [left_eye, right_eye] = compositor.read_eyes(&gpu.device, &gpu.queue)?;
+        let left = nonblack(&left_eye.2);
+        let right = nonblack(&right_eye.2);
+        let different = left_eye
+            .2
+            .iter()
+            .zip(&right_eye.2)
+            .filter(|(a, b)| a != b)
+            .count();
+        let total = left_eye.2.len();
         println!(
             "offline OpenXR-style composite: left nonblack {left}/{total}, right nonblack {right}/{total}, eyes differ at {different} pixels"
         );
+        if let Some(prefix) = std::env::var_os("SSX3_VR_OFFLINE_SAVE") {
+            let prefix = prefix.to_string_lossy();
+            std::fs::write(
+                format!("{prefix}-left.png"),
+                png::encode(left_eye.0, left_eye.1, &left_eye.2),
+            )?;
+            std::fs::write(
+                format!("{prefix}-right.png"),
+                png::encode(right_eye.0, right_eye.1, &right_eye.2),
+            )?;
+        }
         if left < total * 9 / 10 || right < total * 9 / 10 || different < total / 20 {
             return Err("Offline compositor produced an empty or duplicated eye".into());
         }

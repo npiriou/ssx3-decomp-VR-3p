@@ -53,7 +53,13 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   camera-anchored plane (default 1.3 × 1.3 m at 2 m). The offline race
   preview is readable in the central field. A menu frame without a 3D
   camera becomes a spatial card. The OpenXR compositor shader parses and
-  validates. Headset comfort and menu interaction remain unverified.
+  validates. The offline pipeline can now save the final compositor's two
+  1920-square eye images. A forward Gravitude capture at frame 1001 shows
+  placement, time, course progress, speed and the trick meter within the
+  central view, with the rider still visible. A 95° side capture shows the
+  course without that camera-anchored HUD, as expected when looking away.
+  Both eyes retain the world and HUD. Headset comfort and menu interaction
+  remain unverified.
 - **G1 is still open.** At ARA1 frame 1500, ±90° views show native skybox
   seams and hard mountain-panel edges. The same defects occur with all course
   patches resident, so the Nash view cone is not their cause. The blue dome

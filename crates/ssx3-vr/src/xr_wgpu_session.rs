@@ -316,14 +316,14 @@ impl OfflineStereoTarget {
         Ok(started.elapsed().as_secs_f64() * 1000.0)
     }
 
-    /// Inspect the two *composited* layers, including the spatial HUD. This
+    /// Read the two *composited* layers, including the spatial HUD. This
     /// catches an eye that is blank after the last-stage shader even when the
-    /// source eye textures are correct.
-    pub fn eye_coverage(
+    /// source eye textures are correct, and permits visual inspection.
+    pub fn read_eyes(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Result<(usize, usize, usize, usize), Box<dyn Error>> {
+    ) -> Result<[(u32, u32, Vec<u32>); 2], Box<dyn Error>> {
         let row = (self.width * 4).next_multiple_of(256);
         let layer_bytes = row as u64 * self.height as u64;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -359,20 +359,18 @@ impl OfflineStereoTarget {
         slice.map_async(wgpu::MapMode::Read, |_| {});
         device.poll(wgpu::PollType::wait_indefinitely())?;
         let bytes = slice.get_mapped_range()?;
-        let mut left = 0;
-        let mut right = 0;
-        let mut different = 0;
+        let mut eyes: [Vec<u32>; 2] =
+            std::array::from_fn(|_| Vec::with_capacity((self.width * self.height) as usize));
         for y in 0..self.height as usize {
             for x in 0..self.width as usize {
                 let offset = y * row as usize + x * 4;
-                let a = &bytes[offset..offset + 3];
-                let b = &bytes[layer_bytes as usize + offset..layer_bytes as usize + offset + 3];
-                left += usize::from(a != [0, 0, 0]);
-                right += usize::from(b != [0, 0, 0]);
-                different += usize::from(a != b);
+                for (eye, pixels) in eyes.iter_mut().enumerate() {
+                    let start = eye * layer_bytes as usize + offset;
+                    pixels.push(u32::from_le_bytes(bytes[start..start + 4].try_into()?));
+                }
             }
         }
-        Ok((left, right, different, (self.width * self.height) as usize))
+        Ok(eyes.map(|pixels| (self.width, self.height, pixels)))
     }
 }
 
