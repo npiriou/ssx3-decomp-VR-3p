@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64">
+  <!-- Gravitude's original 64x64 chevron texture, redrawn at vector resolution.
+       The translucent ground and two clipped chevrons retain its tile layout. -->
+  <rect width="64" height="64" fill="#59ff99" fill-opacity=".361"/>
+  <g fill="#71ffba" stroke="#009d71" stroke-width="3.2" stroke-linejoin="round">
+    <path d="M5 9 H18 L37 31 L18 53 H5 L24 31 Z"/>
+    <path d="M36 9 H49 L68 31 L49 53 H36 L55 31 Z"/>
+  </g>
+</svg>

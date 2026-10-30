@@ -36,7 +36,12 @@ pub struct Pack {
     dumped: HashSet<String>,
     /// Replacement images by name.
     replace: HashMap<String, PathBuf>,
+    /// Small, course-specific VR replacements included in the executable.
+    vr_replacements: bool,
 }
+
+const VR_GRAVITUDE_CHEVRONS: &[u8] =
+    include_bytes!("../../../assets/vr-textures/d5c495a1196f376d.png");
 
 impl Pack {
     pub fn from_env() -> Pack {
@@ -77,6 +82,8 @@ impl Pack {
             dump,
             dumped: HashSet::new(),
             replace,
+            vr_replacements: dir != "0"
+                && std::env::var("SSX3_VR_TEXTURES").is_ok_and(|v| v == "1"),
         }
     }
 
@@ -106,8 +113,15 @@ impl Pack {
 
     /// The replacement for `k`, if there is one: its mipmap chain (GS alpha).
     pub fn load(&self, k: &TexKey) -> Option<Vec<Decoded>> {
-        let path = self.replace.get(&name(k))?;
-        match read_png(path) {
+        let name = name(k);
+        let source = if let Some(path) = self.replace.get(&name) {
+            read_png(path)
+        } else if self.vr_replacements && name == "d5c495a1196f376d" {
+            decode_png(std::io::Cursor::new(VR_GRAVITUDE_CHEVRONS))
+        } else {
+            return None;
+        };
+        match source {
             Ok((w, h, rgba)) => {
                 let px: Vec<u32> = rgba
                     .chunks(4)
@@ -120,7 +134,7 @@ impl Pack {
                 }))
             }
             Err(e) => {
-                eprintln!("[gfx] {}: {e}", path.display());
+                eprintln!("[gfx] replacement {name}: {e}");
                 None
             }
         }
@@ -140,7 +154,11 @@ fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), 
 /// 8; palettes are expanded by the decoder).
 fn read_png(path: &std::path::Path) -> Result<(u32, u32, Vec<u8>), String> {
     let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+    decode_png(std::io::BufReader::new(f))
+}
+
+fn decode_png(input: impl std::io::BufRead + std::io::Seek) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut dec = png::Decoder::new(input);
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut rd = dec.read_info().map_err(|e| e.to_string())?;
     let mut buf = vec![0; rd.output_buffer_size().ok_or("image too large")?];
@@ -203,6 +221,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_vr_chevrons_decode_with_translucent_ground() {
+        let (w, h, rgba) = decode_png(std::io::Cursor::new(VR_GRAVITUDE_CHEVRONS)).unwrap();
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        assert!(rgba.chunks_exact(4).any(|p| p[3] < 128));
+        assert!(rgba.chunks_exact(4).any(|p| p[3] == 255));
+    }
+
+    #[test]
     fn mip_chain_halves_to_one_pixel() {
         let d = Decoded {
             width: 8,
@@ -237,6 +264,7 @@ mod tests {
             dump: Some(dir.clone()),
             dumped: HashSet::new(),
             replace: HashMap::new(),
+            vr_replacements: false,
         };
         p.dump(&k, &d);
         let file = dir.join(format!("{}.png", name(&k)));

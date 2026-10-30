@@ -195,6 +195,16 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   preparation, so the experiment was removed. The coarse close surfaces need
   separate geometry and source-texture inspection rather than a global mip
   switch.
+  Gravitude's overhead chevrons are a separate close-view case: the original
+  art is a translucent 64 × 64 texture, so the arrows look stair-stepped even
+  when each eye is rendered at 1920 × 1920. A traced 512 × 512 version of
+  that same two-chevron tile is now bundled with the VR executable. Offline
+  stereo frame-1000 captures show smooth arrow outlines while both eyes keep
+  full coverage. The 20-repeat frozen-frame A/B timings varied by several
+  milliseconds between adjacent runs, so there is no reliable frame-rate
+  claim from this change. Custom texture-pack files take precedence, and
+  `SSX3_VR_TEXTURES=0` disables the built-in replacement. Other close objects
+  still use their native textures.
 
 Keep headset review behind the remaining G1 coverage and G3 pacing work.
 All game captures in this investigation used `SSX3_AUDIO=0`.

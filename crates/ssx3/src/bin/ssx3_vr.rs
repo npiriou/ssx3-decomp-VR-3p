@@ -162,6 +162,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     // Ask Nash to retain nearby world nodes in every head direction before
     // the typed frame is published. Desktop/headless runs keep their cull.
     std::env::set_var("SSX3_VR_VISIBILITY", "1");
+    // Ship the few hand-reconstructed close-view textures with the VR binary.
+    // An explicit texture pack still overrides individual built-in images.
+    if std::env::var_os("SSX3_VR_TEXTURES").is_none() {
+        std::env::set_var("SSX3_VR_TEXTURES", "1");
+    }
     game::init_standalone();
     settings::load();
     // VR's first target is fixed at 60 game updates per second. Display

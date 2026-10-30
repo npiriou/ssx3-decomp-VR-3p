@@ -113,6 +113,11 @@ UltraSharp model, 4×; `--setup` downloads them into `textures/.tools`): it keep
 textures seamless and upscales alpha separately. Replaced textures get mipmaps and
 anisotropic filtering.
 
+The VR executable enables `SSX3_VR_TEXTURES=1` by default. This bundles a traced,
+high-resolution replacement for Gravitude's close overhead chevrons; `0` disables
+it. A file with the same texture name in `SSX3_TEX_REPLACE` takes precedence, and
+`SSX3_TEX_REPLACE=0` disables all replacements.
+
 Alpha in the PNGs is the GS's doubled (255 = opaque). Render targets, the frame-feedback
 passes and movie frames are not textures and are not dumped. `textures/` is ignored by git
 (the dumps are game data).
