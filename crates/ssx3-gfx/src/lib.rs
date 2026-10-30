@@ -1939,7 +1939,7 @@ impl Inner {
                         Some(info) => {
                             if dbg.texlog == Some(self.stats.frames) {
                                 let k = tex::key(mem, info, st.texa);
-                                eprintln!("[gfx-tex] info {info:#x} format {:#x} pixels {:#x} tex0 {:#x} hash {:#x}", k.format, k.pixels, k.tex0, k.hash);
+                                eprintln!("[gfx-tex] info {info:#x} name {} format {:#x} pixels {:#x} tex0 {:#x} hash {:#x}", pack::name(&k), k.format, k.pixels, k.tex0, k.hash);
                             }
                             let t = if bake_tint {
                                 self.bake_texture(info, st.texa, sk, mem)
@@ -3622,6 +3622,9 @@ impl Build {
         } else {
             String::new()
         };
+        let inspect_mesh = std::env::var("SSX3_VR_INSPECT_MESH")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
         let refine_terrain = matches!(terrain_mode.as_str(), "1" | "cpu" | "gpu");
         let terrain_reprojections: Vec<Option<[[[f32; 4]; 4]; 2]>> = if refine_terrain {
             built
@@ -3787,6 +3790,34 @@ impl Build {
                                     }
                                 }
                                 for c in g {
+                                    if n == inspect_mesh
+                                        && c.program == ssx3_render::gpu::Program::Mat3Mesh
+                                    {
+                                        let positions: Vec<[f32; 3]> = c
+                                            .data
+                                            .chunks_exact(4)
+                                            .map(|vertex| {
+                                                std::array::from_fn(|axis| {
+                                                    vertex[0][axis] as i32 as f32 / 32768.0
+                                                })
+                                            })
+                                            .collect();
+                                        let bounds = std::array::from_fn::<_, 3, _>(|axis| {
+                                            positions.iter().fold(
+                                                [f32::INFINITY, f32::NEG_INFINITY],
+                                                |[lo, hi], p| [lo.min(p[axis]), hi.max(p[axis])],
+                                            )
+                                        });
+                                        eprintln!(
+                                            "[vr-mesh] draw {} call {:?}: {} vertices, {} indices, bounds {:?}, first {:?}",
+                                            n.unwrap_or_default(),
+                                            vu_call.entry,
+                                            positions.len(),
+                                            c.draw_len(),
+                                            bounds,
+                                            &positions[..positions.len().min(4)]
+                                        );
+                                    }
                                     if vr_sky_dome && matches!(owner, Owner::Payload(0)) {
                                         sky_dome_calls.push(c.clone());
                                     }

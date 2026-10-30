@@ -443,16 +443,27 @@ sky gradient, but leaves the cliff and foreground visibly coarse; suppressing
 that draw is therefore no solution. The defect spans the native world meshes,
 terrain colour pass, and the source assets rather than the snow tile alone.
 
+The traced Mat3 rock texture is an opaque 128 × 128 tile, named
+`b971a7abaf011a26.png` in the texture dump. The offending General draw uses
+multiple native mesh calls with roughly 20–67 vertices each. An all-direction
+Nash visibility run at the same game frame produced a byte-identical side
+image, so missing gaze-cull nodes are not causing this particular edge. A
+1254-square rock texture trial adds visible surface detail but cannot change
+the straight source silhouette. It was not installed: adjacent 1920-square
+offline-pipeline runs with a 90-degree turn at frame 500 measured 60.2 fresh
+stereo images/s with the original and 57.7/s with the trial. These short runs
+vary, but do not establish a free quality gain.
+
 Three texture/refinement trials were rejected. Increasing the optional Bezier
 terrain refinement from threshold 10 to 1 barely changed the side image and
 exhausted its triangle budget. A generated opaque snow replacement lost the
 original tile's variable alpha and made the blend harsher. A procedural
 detail version that preserved alpha had little visible benefit and dropped
 the live 1920-square offline fresh-stereo rate from about 59.8 to 57.4-59.0/s
-across adjacent runs. No trial was installed. The next G1 work should identify
-the offending Mat3 mesh and its original texture, then compare its geometry,
-material and colour against the game's normal forward view before changing
-the VR renderer. G3 still requires a live OpenXR pacing measurement.
+across adjacent runs. No trial was installed. The next G1 work must address
+the source mesh silhouette and its material together; texture upscaling alone
+leaves the main defect visible. G3 still requires a live OpenXR pacing
+measurement.
 
 Keep headset review behind the remaining G1 coverage and G3 pacing work.
 All game captures in this investigation used `SSX3_AUDIO=0`.
