@@ -751,6 +751,9 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     let mut pending_max = 0usize;
     let mut race_mark = None;
     let mut pose_errors = Vec::new();
+    let mut fresh_intervals_ms = Vec::new();
+    let mut present_ages_ms = Vec::new();
+    let mut last_fresh_at: Option<Instant> = None;
     let turn_at = std::env::var("SSX3_VR_OFFLINE_TURN_AT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
@@ -843,6 +846,9 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                     if let Some(drawn) = rendered_eyes {
                         pose_errors.push(vr_camera::rotation_delta_deg(eyes[0], drawn[0]));
                     }
+                    if let Some(age) = gfx.present_age_ms() {
+                        present_ages_ms.push(age);
+                    }
                 }
                 gpu_wait_ms += compositor.blit_stereo(
                     &gpu.device,
@@ -853,7 +859,15 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                     panel,
                 )?;
                 submitted += 1;
-                fresh += u64::from(stereo.is_some() && serial != last_serial);
+                let is_fresh = stereo.is_some() && serial != last_serial;
+                fresh += u64::from(is_fresh);
+                if game_frame >= 420 && is_fresh {
+                    let now = Instant::now();
+                    if let Some(previous) = last_fresh_at.replace(now) {
+                        fresh_intervals_ms
+                            .push(now.duration_since(previous).as_secs_f64() * 1000.0);
+                    }
+                }
                 last_serial = serial;
             } else {
                 let t = Instant::now();
@@ -924,6 +938,28 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         );
     }
     println!("offline renderer: {}", gfx.timing_report());
+    let quantiles = |values: &mut Vec<f64>| {
+        if values.is_empty() {
+            return None;
+        }
+        values.sort_by(f64::total_cmp);
+        let p95 = ((values.len() * 95).div_ceil(100) - 1).min(values.len() - 1);
+        Some((
+            values[values.len() / 2],
+            values[p95],
+            values[values.len() - 1],
+        ))
+    };
+    if let (Some((interval_p50, interval_p95, interval_max)), Some((age_p50, age_p95, age_max))) = (
+        quantiles(&mut fresh_intervals_ms),
+        quantiles(&mut present_ages_ms),
+    ) {
+        println!(
+            "offline race image timing: fresh interval p50 {interval_p50:.2}ms p95 {interval_p95:.2}ms max {interval_max:.2}ms ({} intervals); presented age p50 {age_p50:.2}ms p95 {age_p95:.2}ms max {age_max:.2}ms ({} images)",
+            fresh_intervals_ms.len(),
+            present_ages_ms.len(),
+        );
+    }
     if !pose_errors.is_empty() {
         pose_errors.sort_by(f32::total_cmp);
         let count = pose_errors.len();

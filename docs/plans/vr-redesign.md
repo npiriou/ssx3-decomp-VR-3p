@@ -795,6 +795,36 @@ with course geometry and distinct stereo. All 34 `ssx3-gfx` tests pass.
 Far backdrop detail, full near/mid/far ±90°/rear coverage and sustained
 OpenXR pacing remain open.
 
+### Sustained offline cadence and mid-course quality (2026-10-31)
+
+At 1920 square per eye, a muted 3,600-tick Snow Jam race held 59.9 game
+ticks/s and 59.9 fresh stereo images/s over frames 420–3601 while the
+head direction swept from forward to 180° at 18°/s. The simulated 72 Hz
+display received 72.0 stereo submissions/s. Eye rotation lag was 0.25°
+at p95 and 0.63° at maximum; the final rear view filled both eyes with
+distinct course imagery. There were no gaze-visibility misses.
+
+A second 3,600-tick run on the more expensive Gravitude course held 59.9
+game ticks/s and 59.8 fresh stereo images/s over frames 420–3601, with a
++90° turn at tick 1800. It had one 13.0 ms visibility wait, no miss, and
+two filled, distinct eyes at the end. A repeat with per-image timing gave
+fresh-image intervals of 15.95 ms median, 22.70 ms p95 and 34.80 ms max;
+the presented world's age was 2.28 ms median, 10.07 ms p95 and 18.46 ms
+max. Sampling a 60 Hz game at 72 Hz naturally repeats some game states;
+the interval quantiles alone are not a count of dropped headset frames.
+These runs exercise the same game/render workers and stereo/HUD compositor,
+but omit OpenXR swapchain waits and the SteamVR compositor. G3 therefore
+remains open.
+
+The mid-course Snow Jam -90° capture at tick 2400 shows a close blue ice
+surface stretched and blurred at a glancing angle. A forward view confirms
+it is part of the course. The Gravitude +90° view at tick 3600 also shows
+stretched close snow detail. Both defects are already present in the raw
+world eyes before HUD composition. They need source material/UV inspection;
+full eye coverage does not establish acceptable image quality. A separate
+`SSX3_FRAME_DUMP=2` diagnostic run incurred substantial capture overhead
+and is excluded from the cadence comparison.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase
