@@ -37,7 +37,7 @@ configuration. The plain command above is the recommended way to play.
 | `SSX3_VR_VIS_STATS=1` | Log VR course-node and object counts every 60 visibility passes. |
 | `SSX3_VR_SKY_FILL=0` | Disable the experimental VR-only extension of the original blue sky dome (for comparing its uncovered horizon). |
 | `SSX3_VR_SKY_SPHERE=1` | Use the continuous blue sky sphere built from the game's polar texture when the Snow Jam panorama is disabled. |
-| `SSX3_VR_SKY_PANORAMA=0` | Disable Snow Jam's VR 360° backdrop (enabled by default for that course). |
+| `SSX3_VR_SKY_PANORAMA=0` | Disable Snow Jam's VR sky reconstruction, which keeps the two source panels containing sky and fills other directions from the native polar dome (enabled by default for that course). |
 | `SSX3_VR_SKY_RIDGE_PANO=0` | Disable Ruthless Ridge's VR sky backdrop (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_CITY_PANO=0` | Disable Metro City's VR sky backdrop (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_WRAP=1` | Enable the earlier experimental Ruthless Ridge sky-panel wrap for comparison; also set `SSX3_VR_SKY_RIDGE_PANO=0`. |

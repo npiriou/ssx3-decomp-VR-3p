@@ -41,19 +41,24 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   texture. A VR-only Mat3 shader mode uses linear UVs for that synthetic mesh:
   the original GS STQ formula divides by the old camera's `w`, which crosses
   zero on a complete sphere and caused the earlier zigzag seams. Offline
-  ±90° captures show a continuous blue dome. The Snow Jam VR path now maps
-  its six native 256×128 mountain textures
-  onto a camera-space 360° shell, mirrors its two edge textures into the
-  missing rear sector, and blends the shell into that blue dome. The native
-  sky's final draw varies with the scene (draw 7 exists at ARA1 frames 500
+  ±90° captures show a continuous blue dome. The Snow Jam VR path initially
+  mapped its six native 256×128 textures onto a camera-space shell. Inspection
+  of the decoded assets showed that the first four contain only mountains,
+  without any sky. Extending them around a tracked view made a huge wall of
+  stretched snow in the upper sky. The VR path now omits those four panels,
+  keeps the two panels with blue sky, and fills uncovered directions with the
+  original polar dome. Frame-500 and frame-1500 forward/side captures with the
+  four panels omitted retain the riders and course but lose the snow wall;
+  the distant sky is plainer and still uses low-resolution original assets.
+  The native sky's final draw varies with the scene (draw 7 exists at ARA1 frames 500
   and 1000, but not 1500); the replacement identifies the full contiguous
   sky draw prefix so that extra flat panel no longer cuts a triangle into a
   side view. Offline ARA1 captures at frames 500, 1000 and 1500 cover 0°,
   ±90° and 180°. At frame 1000, the previously visible triangle beside the
   Take 2 sign is gone. Direct and retained-scene +90° stereo PNGs match
-  byte-for-byte, with different images in the two eyes. The native backdrop
-  still looks stretched and soft in places, particularly behind the rider;
-  headset presentation is unverified. Snow Jam uses this path by default in
+  byte-for-byte, with different images in the two eyes. The remaining native
+  backdrop is still soft in places; headset presentation is unverified.
+  Snow Jam uses this path by default in
   VR (`SSX3_VR_SKY_PANORAMA=0` disables it). Metro City's different sky is
   matched by its own texture sequence and now uses the same native-sector
   reconstruction as Ruthless Ridge by default
@@ -147,6 +152,14 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   the same visibility and bloom setting measured 14.89 ms (p95 18.44 ms).
   On CRA3 frames 420–500, the full-resolution stereo producer measured
   10.56 ms per frame (p95 11.89 ms) with the course sky path enabled.
+  After omitting Snow Jam's four mountain-only backdrop panels, a fresh ARA1
+  frames-420–500 run at 1920² per eye and 90° gaze measured 11.69 ms/frame
+  (p95 13.12 ms), with `halted: None` and no frame-memory misses. At ARA1
+  frame 1500, direct and retained-scene 1024² side-view images matched
+  byte-for-byte for both eyes; 901,406 pixels differed between eyes. A 1920²
+  side-view stereo render had full nonblack coverage in both eyes and
+  3,182,734 differing pixels. These results validate the offline renderer,
+  not a headset frame rate.
   Their post-process paths differ, so this is evidence only that the stereo
   producer can run near 60 Hz offline. The OpenXR blit, compositor, headset
   pacing and queue synchronization are absent; the live target remains

@@ -3406,6 +3406,18 @@ impl Build {
                                     if vr_sky_dome && matches!(owner, Owner::Payload(0)) {
                                         sky_dome_calls.push(c.clone());
                                     }
+                                    // Snow Jam's first four 256x128 backdrop
+                                    // textures contain mountains but no sky.
+                                    // Stretching them around a tracked 360°
+                                    // view turns the upper sky into a wall of
+                                    // enlarged snow. The polar dome supplies
+                                    // blue sky behind the actual course mesh.
+                                    if panorama_sky && n.is_some_and(|n| (1..=4).contains(&n)) {
+                                        if !c.pre.is_empty() {
+                                            b.gs.gif(&c.pre);
+                                        }
+                                        continue;
+                                    }
                                     if (panorama_sky || ridge_panorama || city_panorama)
                                         && matches!(owner, Owner::Payload(n) if *n > 0 && *n < sky_draws)
                                     {
