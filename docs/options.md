@@ -25,6 +25,13 @@ configuration. The plain command above is the recommended way to play.
 
 **Experimental SteamVR front end** (`ssx3-vr`):
 
+`ssx3-vr --offline-pipeline 500` runs the independent game/render pipeline
+against a simulated 72 Hz presenter, without SteamVR. It mutes audio and
+reports game, stereo presentation and fresh stereo rates after race frame 420.
+Set `SSX3_VR_OFFLINE_TURN_AT=450` and optionally
+`SSX3_VR_OFFLINE_TURN_DEG=90` to simulate a head turn during that run.
+The measurements exclude OpenXR blit and headset compositor time.
+
 | Variable | Effect |
 | --- | --- |
 | `SSX3_VR_EYE_SIZE=<pixels>` | Internal square eye target, 512–3840. The OpenXR recommended per-eye size is the default; the program logs both sizes. |

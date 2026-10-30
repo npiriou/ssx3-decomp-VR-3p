@@ -227,6 +227,10 @@ type Job = ssx3_ps2::frame_sink::Published;
 #[derive(Default)]
 pub struct Shared {
     tx: Mutex<Option<std::sync::mpsc::SyncSender<Job>>>,
+    /// Serializes renderer queue writes/submissions with OpenXR's Vulkan
+    /// acquire, release and frame submission on the same VkQueue. The game
+    /// frame's CPU build can run without holding it.
+    queue_access: Arc<Mutex<()>>,
     /// Frames sent and not yet rendered.
     pending: Mutex<usize>,
     idle: std::sync::Condvar,
@@ -237,6 +241,8 @@ pub struct Shared {
     /// The latest frame's images (in-between ones first) and when they
     /// were ready.
     present: Mutex<Option<(Vec<wgpu::Texture>, web_time::Instant)>>,
+    /// Increments after a complete image set is published or reprojected.
+    present_serial: std::sync::atomic::AtomicU64,
     ui_present: Mutex<Option<wgpu::Texture>>,
     vr_eyes: Mutex<Option<[vr::Eye; 2]>>,
 }
@@ -438,6 +444,33 @@ impl Renderer {
         }))
     }
 
+    /// Generation of the latest complete present image set.
+    pub fn present_serial(&self) -> u64 {
+        self.1
+            .present_serial
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn present_age_ms(&self) -> Option<f64> {
+        let g = self.1.present.lock().unwrap();
+        Some(g.as_ref()?.1.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    /// Game frames waiting for the render worker, including one blocked on
+    /// its bounded handoff channel.
+    pub fn pending_frames(&self) -> usize {
+        *self.1.pending.lock().unwrap()
+    }
+
+    /// Prevent the renderer worker from submitting to the shared Vulkan
+    /// queue while OpenXR acquires, releases, or ends a frame on that queue.
+    /// This does not wait for a pending game frame: its last completed image
+    /// remains available to the compositor.
+    pub fn with_queue_exclusive<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _queue = self.1.queue_access.lock().unwrap();
+        f()
+    }
+
     /// The game's HUD, rendered on transparent pixels for a spatial VR card.
     pub fn present_vr_ui_view(&self) -> Option<wgpu::TextureView> {
         let g = self.1.ui_present.lock().unwrap();
@@ -479,10 +512,33 @@ impl Renderer {
     pub fn refresh_vr_eyes(&self, eyes: [vr::Eye; 2]) -> bool {
         self.flush();
         let mut g = self.0.lock().unwrap();
+        let _queue = self.1.queue_access.lock().unwrap();
         if !g.refresh_vr_eyes(eyes) {
             return false;
         }
         *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
+        self.1
+            .present_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        true
+    }
+
+    /// Refresh the last completed scene only when the game worker has not
+    /// published a newer image. Unlike the explicit refresh above, this
+    /// cannot wait for a continuous stream of pending game ticks.
+    pub fn refresh_vr_eyes_if_stale(&self, eyes: [vr::Eye; 2], serial: u64) -> bool {
+        let mut g = self.0.lock().unwrap();
+        if self.present_serial() != serial || *self.1.pending.lock().unwrap() != 0 {
+            return false;
+        }
+        let _queue = self.1.queue_access.lock().unwrap();
+        if *self.1.pending.lock().unwrap() != 0 || !g.refresh_vr_eyes(eyes) {
+            return false;
+        }
+        *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
+        self.1
+            .present_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         true
     }
 
@@ -1041,10 +1097,14 @@ impl Inner {
 
     /// Render a frame.
     pub fn render(&mut self, built: &Built, mem: &(dyn Mem + Sync)) {
-        self.render_one(built, mem);
+        let access = self.shared.queue_access.clone();
+        let _queue = self.render_one(built, mem, &access);
         *self.shared.present.lock().unwrap() =
             (!self.present.is_empty()).then(|| (self.present.clone(), web_time::Instant::now()));
         *self.shared.ui_present.lock().unwrap() = self.ui_present.clone();
+        self.shared
+            .present_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// The build state, moved out of the renderer (see `Build`).
@@ -1070,7 +1130,12 @@ impl Inner {
         self.zscale = b.zscale;
     }
 
-    fn render_one(&mut self, built: &Built, mem: &(dyn Mem + Sync)) {
+    fn render_one<'a>(
+        &mut self,
+        built: &Built,
+        mem: &(dyn Mem + Sync),
+        access: &'a Mutex<()>,
+    ) -> std::sync::MutexGuard<'a, ()> {
         self.stats.frames += 1;
         self.vr_last_published = None;
         self.vr_last_batches = None;
@@ -1095,6 +1160,7 @@ impl Inner {
             .iter()
             .filter(|m| m.view_proj[2][3].abs() > 0.5)
             .last();
+        let queue = access.lock().unwrap();
         if let (Some(eyes), Some(source)) = (eyes, source) {
             self.vr_reprojections = eyes.map(|eye| {
                 built
@@ -1132,7 +1198,7 @@ impl Inner {
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
                 self.vr_ui = false;
                 self.vr_last_batches = Some(batches);
-                return;
+                return queue;
             }
         }
         if eyes.is_some() && source.is_none() {
@@ -1146,10 +1212,11 @@ impl Inner {
             std::mem::swap(&mut self.targets, &mut self.ui_targets);
             self.vr_ui = false;
             self.vr_menu = false;
-            return;
+            return queue;
         }
         self.ui_present = None;
         self.draw_built(mem, &batches, false, false);
+        queue
     }
 
     fn refresh_vr_eyes(&mut self, eyes: [vr::Eye; 2]) -> bool {

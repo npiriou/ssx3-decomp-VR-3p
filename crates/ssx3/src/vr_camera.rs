@@ -53,6 +53,24 @@ fn rotate(q: xr::Quaternionf, v: [f32; 3]) -> [f32; 3] {
     add(v, add(scale(t, q.w), cross(u, t)))
 }
 
+/// A retained scene needs another eye render only when the predicted pose
+/// moved beyond headset tracking noise. Game ticks already draw a new scene.
+pub fn eyes_moved(now: [Eye; 2], shown: [Eye; 2], units_per_metre: f32) -> bool {
+    let position_limit = units_per_metre * 0.001; // one physical millimetre
+    now.into_iter().zip(shown).any(|(a, b)| {
+        let translation = (0..3)
+            .map(|i| (a.view_from_game[3][i] - b.view_from_game[3][i]).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        translation > position_limit
+            || (0..3).any(|c| {
+                (0..3).any(|r| (a.view_from_game[c][r] - b.view_from_game[c][r]).abs() > 0.0015)
+            })
+            || (0..4)
+                .any(|c| (0..4).any(|r| (a.projection[c][r] - b.projection[c][r]).abs() > 0.0001))
+    })
+}
+
 impl Anchor {
     pub fn new(views: &[xr::View]) -> Option<Self> {
         if views.len() != 2 {
@@ -156,5 +174,21 @@ mod tests {
         assert!((forward[0] - 1.0).abs() < 1e-4);
         assert!(forward[2].abs() < 1e-4);
         assert_eq!(eyes[0].view_from_game[3], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn retained_scene_refresh_ignores_tracking_noise_but_sees_head_turn() {
+        let eye = Eye {
+            view_from_game: vr::IDENTITY,
+            projection: vr::IDENTITY,
+        };
+        let mut tiny = eye;
+        tiny.view_from_game[3][0] = 0.05; // 0.5 mm at 100 units/m
+        assert!(!eyes_moved([tiny; 2], [eye; 2], 100.0));
+        tiny.view_from_game[3][0] = 0.2;
+        assert!(eyes_moved([tiny; 2], [eye; 2], 100.0));
+        let mut turned = eye;
+        turned.view_from_game[0][2] = 0.01;
+        assert!(eyes_moved([turned; 2], [eye; 2], 100.0));
     }
 }

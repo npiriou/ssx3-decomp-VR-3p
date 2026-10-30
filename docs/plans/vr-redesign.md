@@ -9,6 +9,22 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   (1920 × 1920 on the local PICO), with no automatic descent to 512. It logs
   per-stage p50/p95/max timing windows. These new counters still need a live
   headset capture; CPU queue-wait time is not a per-eye GPU timestamp.
+- The game now runs on its own 60 Hz thread while the OpenXR thread presents
+  the latest complete stereo image. A queue lock protects shared Vulkan
+  submissions and OpenXR acquire/release/end; the renderer can prepare a new
+  game frame while OpenXR presents the previous one. A generation counter
+  distinguishes newly rendered eyes from repeated submissions. The view-only
+  path redraws the retained scene when the tracked eyes move and no newer
+  game image is ready. `ssx3-vr --offline-pipeline 500` exercises this
+  scheduling without starting SteamVR and always mutes game audio.
+  At 1920 × 1920 per eye, offline frames 420–501 on Gravitude with a 90°
+  simulated head turn measured 60.0 game ticks/s, 71.1 stereo presentations/s
+  and 58.5 fresh stereo images/s. After the game stopped, another 5° head
+  turn redrew the retained scene: both eyes remained filled and 3,171,485
+  pixels differed between them. An adjacent static ARA1 run measured 59.8
+  ticks/s, 71.8 stereo presentations/s and 59.8 fresh images/s. The offline
+  presenter waits for GPU work but omits OpenXR blit and the headset compositor;
+  headset pacing, comfort and the 60 fresh images/s target remain unverified.
 - Nash retains a headset-directed 75° cone of loaded patches and instances,
   plus nearby objects in every direction, before the game's destructive
   forward cull. Headless ARA1 captures at frames 500, 1000, 1500 confirm
@@ -114,10 +130,10 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   their shared preparation; lowering UI refresh would not address the limit.
   Suppressing all remaining original post passes experimentally saved only
   about 1.4 ms; it was not adopted. These are renderer measurements on one frozen frame, before
-  the live game, compositor and headset costs. The real game loop still
-  serializes game ticks, renderer flush, OpenXR acquire/blit/release and
-  end_frame. The 60 new stereo images/s target has not been met or measured
-  on the headset with this build.
+  the live game, compositor and headset costs. The earlier serialized loop
+  has since been replaced by the independent game/OpenXR pipeline described
+  above. The 60 new stereo images/s target has not been measured on the
+  headset with this build.
   The first shared-scene input pass now uploads GS vertices, VU call data,
   mesh indices, shadow uniforms, and static caster data once per game frame
   rather than three times for left eye, right eye, and UI. On the same frozen
@@ -125,8 +141,8 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   measured 16.36 ms before and 14.24 ms after (frame extraction was 3.01 ms
   and 2.78 ms). The left, right, and UI PNG files have identical SHA-256
   hashes before and after. This is a local renderer improvement, not a live
-  SteamVR frame-rate result; the remaining duplicated draw planning and
-  serialized OpenXR loop are still open.
+  SteamVR frame-rate result; duplicated draw planning remains. The serialized
+  OpenXR loop has since been replaced by the pipeline above.
   The renderer also retains the latest published frame's texture pages and
   ordered GS batches. When OpenXR asks for an image between game ticks, it
   can draw two new tracked eyes from that scene without rerunning the
@@ -136,8 +152,8 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   the eyes differ from one another. One isolated 1920² view-only refresh
   with a GPU wait measured 5.92 ms. The live loop now reports submitted
   OpenXR frames separately from fresh stereo images and times the refresh.
-  Game ticks and XR submission still share one thread, so 60 fresh stereo
-  images/s on hardware remains unproven.
+  Game ticks and XR submission now run on separate threads, but 60 fresh
+  stereo images/s on hardware remains unproven.
   On one frozen ARA1 frame at 1920² with GPU waits and bloom off, an adjacent
   20-repeat comparison measured 15.30 ms/frame with the current lower-band
   dome and 14.69 ms/frame with the opt-in full sphere. This is only an offline

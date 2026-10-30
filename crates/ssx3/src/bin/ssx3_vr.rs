@@ -7,6 +7,8 @@ extern crate ssx3_ee_threads as ssx3_ee;
 extern crate ssx3_ee_unwind as ssx3_ee;
 
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gilrs::{Axis, Button, Gilrs};
@@ -17,8 +19,8 @@ use ssx3_vr::xr_wgpu_session::{self, StereoTarget, VIEW_TYPE};
 const STAGE_NAMES: [&str; 10] = [
     "xr_wait",
     "xr_begin",
-    "game_tick",
-    "gfx_flush",
+    "gfx_lock",
+    "present_age",
     "xr_acquire",
     "blit_encode",
     "queue_wait",
@@ -66,6 +68,125 @@ impl StageWindow {
             values.clear();
         }
         out
+    }
+}
+
+#[derive(Default)]
+struct GameProgress {
+    running: AtomicBool,
+    stop: AtomicBool,
+    frames: AtomicU64,
+    tick_us: AtomicU64,
+    status: Mutex<String>,
+    error: Mutex<Option<String>>,
+}
+
+/// The EE machine is created and stays on this thread. It publishes one
+/// native game state per 60 Hz tick while OpenXR presents completed images
+/// independently on the calling thread.
+struct GameWorker {
+    progress: Arc<GameProgress>,
+    start: Option<mpsc::SyncSender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl GameWorker {
+    fn boot() -> Result<(Self, ssx3_gfx::Renderer), Box<dyn Error>> {
+        let progress = Arc::new(GameProgress::default());
+        let state = progress.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let (start_tx, start_rx) = mpsc::sync_channel(0);
+        let thread = std::thread::Builder::new()
+            .name("ssx3-game".into())
+            .spawn(move || {
+                let mut cpu = game::boot(true);
+                let gfx = game::install_renderer(&mut cpu);
+                let playable = gfx.is_some();
+                if ready_tx.send(gfx).is_err() || !playable || start_rx.recv().is_err() {
+                    return;
+                }
+                let mut gilrs = Gilrs::new().map(Some).unwrap_or_else(|err| {
+                    eprintln!("[vr pad] gamepad API unavailable: {err}");
+                    None
+                });
+                let game_hz = ssx3_ps2::machine::vsync_hz() as f64 / 1.001;
+                let mut pacer = ssx3_game::tick::Pacer::default();
+                let mut clock = Instant::now();
+                let mut was_running = false;
+                while !state.stop.load(Ordering::Acquire) {
+                    if !state.running.load(Ordering::Acquire) {
+                        was_running = false;
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    if !was_running {
+                        clock = Instant::now();
+                        pacer = ssx3_game::tick::Pacer::default();
+                        was_running = true;
+                    }
+                    let plan = pacer.plan(clock.elapsed().as_secs_f64(), 1.0 / game_hz, 8, true);
+                    ssx3_ps2::machine::set_audio_lead_frames((pacer.audio_lead() * 48000.0) as u32);
+                    ssx3_game::tick::set_updates_per_vsync(plan.updates_per_vsync.max(1));
+                    for _ in 0..plan.vsyncs {
+                        if state.stop.load(Ordering::Acquire)
+                            || !state.running.load(Ordering::Acquire)
+                        {
+                            break;
+                        }
+                        let start = Instant::now();
+                        update_pad(&mut gilrs, &mut cpu);
+                        if !ssx3_ps2::machine::run_frame(&mut cpu) {
+                            *state.error.lock().unwrap() = Some(format!(
+                                "Game halted: {:?}",
+                                ssx3_ps2::m!(cpu).kernel.halted
+                            ));
+                            return;
+                        }
+                        state
+                            .tick_us
+                            .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                        let frames = state.frames.fetch_add(1, Ordering::Release) + 1;
+                        if frames % 60 == 0 {
+                            *state.status.lock().unwrap() = game::status(&cpu);
+                        }
+                    }
+                    if plan.vsyncs == 0 {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            })?;
+        let worker = Self {
+            progress,
+            start: Some(start_tx),
+            thread: Some(thread),
+        };
+        let gfx = ready_rx
+            .recv()
+            .map_err(|_| "VR game worker stopped during boot")?
+            .ok_or("Native game renderer did not start on the OpenXR GPU")?;
+        // Keep the worker at the boot barrier until the main thread has set
+        // the headset's eye target size.
+        worker.progress.running.store(false, Ordering::Release);
+        Ok((worker, gfx))
+    }
+
+    fn start(&mut self) -> Result<(), Box<dyn Error>> {
+        self.start
+            .take()
+            .ok_or("VR game worker already started")?
+            .send(())?;
+        Ok(())
+    }
+}
+
+impl Drop for GameWorker {
+    fn drop(&mut self) {
+        self.progress.stop.store(true, Ordering::Release);
+        self.progress.running.store(false, Ordering::Release);
+        self.start.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -158,7 +279,7 @@ fn update_pad(gilrs: &mut Option<Gilrs>, cpu: &mut ssx3_ps2::Cpu) {
     sif.pad_sticks[0] = sticks;
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+fn configure_vr_game() {
     // Ask Nash to retain nearby world nodes in every head direction before
     // the typed frame is published. Desktop/headless runs keep their cull.
     std::env::set_var("SSX3_VR_VISIBILITY", "1");
@@ -180,6 +301,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         std::env::set_var("SSX3_BLOOM", "off");
     }
     env_logger::init();
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    configure_vr_game();
     let entry = ssx3_vr::load_entry()?;
     let extensions = entry.enumerate_extensions()?;
     if !extensions.khr_vulkan_enable2 {
@@ -216,12 +341,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let blend = instance.enumerate_environment_blend_modes(system, VIEW_TYPE)?[0];
     let target = StereoTarget::new(&instance, system, &session, &graphics.device)?;
-    let mut cpu = game::boot(true);
-    let gfx = game::install_renderer(&mut cpu);
-    if gfx.is_none() {
-        return Err("Native game renderer did not start on the OpenXR GPU".into());
-    }
-    let gfx = gfx.unwrap();
+    let (mut game_worker, gfx) = GameWorker::boot()?;
     // Keep the internal world image at the OpenXR recommended extent by
     // default. The previous automatic 768 -> 640 -> 512 reduction produced a
     // visibly pixelated image without fixing the headset cadence. An explicit
@@ -240,26 +360,21 @@ fn run() -> Result<(), Box<dyn Error>> {
         target.eye_size().1,
     );
     ssx3_ps2::machine::set_realtime(true);
-    let mut gilrs = Gilrs::new().map(Some).unwrap_or_else(|err| {
-        eprintln!("[vr pad] gamepad API unavailable: {err}");
-        None
-    });
+    game_worker.start()?;
+    let progress = game_worker.progress.clone();
     let exit_after = std::env::var("SSX3_EXIT_AFTER_FRAMES")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
     let no_submit = std::env::var_os("SSX3_VR_NO_SUBMIT").is_some();
     let clear_only = std::env::var_os("SSX3_VR_CLEAR_ONLY").is_some();
     let start = Instant::now();
-    let mut pacer = ssx3_game::tick::Pacer::default();
-    let mut frames = 0u64;
     let mut submitted = 0u64;
     let mut fresh_stereo = 0u64;
     let mut last_fresh_stereo = 0u64;
-    let mut last_gfx_frames = 0u64;
+    let mut last_present_serial = 0u64;
     let mut game_rate_mark = Instant::now();
+    let mut last_game_frames = 0u64;
     let mut last_submitted = 0u64;
-    let mut run_ms = 0.0f64;
-    let mut flush_ms = 0.0f64;
     let mut blit_ms = 0.0f64;
     let mut stages = StageWindow::new();
     let mut events = xr::EventDataBuffer::new();
@@ -267,6 +382,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut requested_exit = false;
     let mut anchor: Option<vr_camera::Anchor> = None;
     let mut current_eyes: Option<[ssx3_gfx::vr::Eye; 2]> = None;
+    let mut last_submitted_eyes: Option<[ssx3_gfx::vr::Eye; 2]> = None;
     let units_per_metre = std::env::var("SSX3_VR_UNITS_PER_M")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
@@ -299,14 +415,18 @@ fn run() -> Result<(), Box<dyn Error>> {
                     eprintln!("[vr] session: {:?}", change.state());
                     match change.state() {
                         xr::SessionState::READY => {
-                            session.begin(VIEW_TYPE)?;
+                            gfx.with_queue_exclusive(|| session.begin(VIEW_TYPE))?;
                             running = true;
+                            progress.running.store(true, Ordering::Release);
+                            game_rate_mark = Instant::now();
+                            last_game_frames = progress.frames.load(Ordering::Acquire);
                         }
                         xr::SessionState::FOCUSED => {
                             anchor = None;
                         }
                         xr::SessionState::STOPPING => {
-                            session.end()?;
+                            progress.running.store(false, Ordering::Release);
+                            gfx.with_queue_exclusive(|| session.end())?;
                             running = false;
                             if requested_exit {
                                 return Ok(());
@@ -328,7 +448,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         let frame = waiter.wait()?;
         stages.elapsed(0, xr_wait_start);
         let xr_begin_start = Instant::now();
-        stream.begin()?;
+        gfx.with_queue_exclusive(|| stream.begin())?;
         stages.elapsed(1, xr_begin_start);
         let (flags, views) =
             session.locate_views(VIEW_TYPE, frame.predicted_display_time, &local)?;
@@ -346,119 +466,120 @@ fn run() -> Result<(), Box<dyn Error>> {
             current_eyes = eyes;
             gfx.set_vr_eyes(eyes);
         }
-        let game_hz = ssx3_ps2::machine::vsync_hz() as f64 / 1.001;
         let display_hz = 1_000_000_000.0 / frame.predicted_display_period.as_nanos() as f64;
-        // The predicted period can briefly say 72 Hz while an idle HMD
-        // wakes this app at 14.4 Hz. Cap wall-clock debt independently of
-        // that prediction so the game still advances at 60 Hz.
-        let plan = pacer.plan(start.elapsed().as_secs_f64(), 1.0 / game_hz, 8, true);
-        ssx3_ps2::machine::set_audio_lead_frames((pacer.audio_lead() * 48000.0) as u32);
-        ssx3_game::tick::set_updates_per_vsync(plan.updates_per_vsync.max(1));
-        for _ in 0..plan.vsyncs {
-            let run_start = Instant::now();
-            update_pad(&mut gilrs, &mut cpu);
-            if !ssx3_ps2::machine::run_frame(&mut cpu) {
-                return Err(format!("Game halted: {:?}", ssx3_ps2::m!(cpu).kernel.halted).into());
-            }
-            frames += 1;
-            run_ms += run_start.elapsed().as_secs_f64() * 1000.0;
-            stages.elapsed(2, run_start);
-            if frames % 60 == 0 {
-                let elapsed = game_rate_mark.elapsed().as_secs_f64().max(1e-6);
-                game_rate_mark = Instant::now();
-                let rate = 60.0 / elapsed;
-                let image_rate = (submitted - last_submitted) as f64 / elapsed;
-                let fresh_rate = (fresh_stereo - last_fresh_stereo) as f64 / elapsed;
-                last_submitted = submitted;
-                last_fresh_stereo = fresh_stereo;
-                let stats = gfx.stats();
-                let present = gfx
-                    .present_stereo_views()
-                    .map(|p| format!("{}x{} stereo", p[0].1, p[0].2))
-                    .unwrap_or_else(|| "none".into());
-                eprintln!(
-                    "[vr {:.1}s] {} | game {:.1} Hz, OpenXR {:.1} Hz, submissions {:.1}/s, fresh stereo {:.1}/s, gfx frames {}, present {present}; run {:.1} ms/frame, flush {:.1} ms, blit {:.1} ms",
-                    start.elapsed().as_secs_f64(),
-                    game::status(&cpu),
-                    rate,
-                    display_hz,
-                    image_rate,
-                    fresh_rate,
-                    stats.frames,
-                    run_ms / 60.0,
-                    flush_ms,
-                    blit_ms,
-                );
-                eprintln!("[vr stages]{}", stages.report_and_reset());
-                eprintln!("[vr gfx] {}", gfx.0.lock().unwrap().timing_report());
-                run_ms = 0.0;
-                flush_ms = 0.0;
-                blit_ms = 0.0;
-            }
+        if let Some(error) = progress.error.lock().unwrap().clone() {
+            return Err(error.into());
         }
-        // OpenXR's Vulkan binding may touch the same VkQueue in acquire,
-        // release and end_frame. Vulkan requires host-side synchronization
-        // against the renderer worker's queue submissions. Until the queue
-        // is wrapped in a shared lock, finish its frame before those calls.
-        let flush_start = Instant::now();
-        gfx.flush();
-        flush_ms += flush_start.elapsed().as_secs_f64() * 1000.0;
-        stages.elapsed(3, flush_start);
-        let built_frames = gfx.stats().frames;
-        let new_game_image = built_frames > last_gfx_frames;
-        last_gfx_frames = built_frames;
-        // At headset rates above the 60 Hz game tick, submit a new view of
-        // the retained scene with this frame's tracked eye poses. The VIF/GS
-        // stream and gameplay simulation are not replayed.
-        let refreshed = if plan.vsyncs == 0 && frame.should_render && !no_submit {
+        if game_worker.thread.as_ref().is_some_and(|t| t.is_finished()) {
+            return Err("VR game worker stopped unexpectedly".into());
+        }
+        // When no newer tick image is ready, redraw the retained native
+        // scene from the predicted headset pose. A game tick can complete
+        // while this runs; the renderer lock selects one complete scene.
+        if frame.should_render
+            && !no_submit
+            && gfx.pending_frames() == 0
+            && gfx.present_serial() == last_present_serial
+            && current_eyes.is_some_and(|eyes| {
+                last_submitted_eyes
+                    .is_none_or(|shown| vr_camera::eyes_moved(eyes, shown, units_per_metre))
+            })
+        {
             let refresh_start = Instant::now();
-            let drawn = current_eyes.is_some_and(|eyes| gfx.refresh_vr_eyes(eyes));
+            let _drawn = current_eyes
+                .is_some_and(|eyes| gfx.refresh_vr_eyes_if_stale(eyes, last_present_serial));
             stages.elapsed(9, refresh_start);
-            drawn
-        } else {
-            false
-        };
-        if frame.should_render && !no_submit {
-            let blit_start = Instant::now();
-            let mut submitted_fresh_stereo = false;
-            if clear_only {
-                target.clear_eyes(&graphics)?;
-            } else if let (Some(hud), Some(eyes)) = (gfx.present_vr_ui_view(), current_eyes) {
-                let stereo = gfx.present_stereo_views();
-                let sources = stereo.as_ref().map(|s| [&s[0].0, &s[1].0]);
-                let panel_eyes = eyes.map(|eye| xr_wgpu_session::PanelEye {
-                    game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game)
-                        .unwrap_or(ssx3_gfx::vr::IDENTITY),
-                    clip: [
-                        eye.projection[0][0],
-                        eye.projection[1][1],
-                        eye.projection[2][0],
-                        eye.projection[2][1],
-                    ],
-                });
-                let timing = target.blit_stereo(&graphics, sources, &hud, panel_eyes, panel)?;
-                submitted_fresh_stereo = stereo.is_some() && (new_game_image || refreshed);
-                stages.push(4, timing.acquire_wait_ms);
-                stages.push(5, timing.encode_submit_ms);
-                stages.push(6, timing.gpu_wait_ms);
-                stages.push(7, timing.release_ms);
-            } else {
-                target.clear_eyes(&graphics)?;
+        }
+        let lock_start = Instant::now();
+        gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
+            stages.elapsed(2, lock_start);
+            if let Some(age) = gfx.present_age_ms() {
+                stages.push(3, age);
             }
-            let xr_end_start = Instant::now();
-            target.submit_frame(
-                &mut stream,
-                frame.predicted_display_time,
-                blend,
-                &local,
-                &views,
-            )?;
-            stages.elapsed(8, xr_end_start);
-            submitted += 1;
-            fresh_stereo += u64::from(submitted_fresh_stereo);
-            blit_ms += blit_start.elapsed().as_secs_f64() * 1000.0;
-        } else {
-            stream.end(frame.predicted_display_time, blend, &[])?;
+            let serial = gfx.present_serial();
+            if frame.should_render && !no_submit {
+                let blit_start = Instant::now();
+                let mut submitted_fresh_stereo = false;
+                if clear_only {
+                    target.clear_eyes(&graphics)?;
+                    last_submitted_eyes = None;
+                } else if let (Some(hud), Some(eyes)) = (gfx.present_vr_ui_view(), current_eyes) {
+                    let stereo = gfx.present_stereo_views();
+                    let sources = stereo.as_ref().map(|s| [&s[0].0, &s[1].0]);
+                    let panel_eyes = eyes.map(|eye| xr_wgpu_session::PanelEye {
+                        game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game)
+                            .unwrap_or(ssx3_gfx::vr::IDENTITY),
+                        clip: [
+                            eye.projection[0][0],
+                            eye.projection[1][1],
+                            eye.projection[2][0],
+                            eye.projection[2][1],
+                        ],
+                    });
+                    let timing = target.blit_stereo(&graphics, sources, &hud, panel_eyes, panel)?;
+                    submitted_fresh_stereo = stereo.is_some() && serial != last_present_serial;
+                    last_submitted_eyes = stereo.as_ref().map(|_| eyes);
+                    stages.push(4, timing.acquire_wait_ms);
+                    stages.push(5, timing.encode_submit_ms);
+                    stages.push(6, timing.gpu_wait_ms);
+                    stages.push(7, timing.release_ms);
+                } else {
+                    target.clear_eyes(&graphics)?;
+                    last_submitted_eyes = None;
+                }
+                let xr_end_start = Instant::now();
+                target.submit_frame(
+                    &mut stream,
+                    frame.predicted_display_time,
+                    blend,
+                    &local,
+                    &views,
+                )?;
+                stages.elapsed(8, xr_end_start);
+                submitted += 1;
+                fresh_stereo += u64::from(submitted_fresh_stereo);
+                blit_ms += blit_start.elapsed().as_secs_f64() * 1000.0;
+                last_present_serial = serial;
+            } else {
+                stream.end(frame.predicted_display_time, blend, &[])?;
+            }
+            Ok(())
+        })?;
+        let frames = progress.frames.load(Ordering::Acquire);
+        if game_rate_mark.elapsed() >= Duration::from_secs(5) {
+            let elapsed = game_rate_mark.elapsed().as_secs_f64().max(1e-6);
+            game_rate_mark = Instant::now();
+            let ticks = frames - last_game_frames;
+            let images = submitted - last_submitted;
+            let rate = ticks as f64 / elapsed;
+            let image_rate = images as f64 / elapsed;
+            let fresh_rate = (fresh_stereo - last_fresh_stereo) as f64 / elapsed;
+            let tick_ms =
+                progress.tick_us.swap(0, Ordering::Relaxed) as f64 / ticks.max(1) as f64 / 1000.0;
+            last_game_frames = frames;
+            last_submitted = submitted;
+            last_fresh_stereo = fresh_stereo;
+            let status = progress.status.lock().unwrap().clone();
+            let present = gfx
+                .present_stereo_views()
+                .map(|p| format!("{}x{} stereo", p[0].1, p[0].2))
+                .unwrap_or_else(|| "none".into());
+            eprintln!(
+                "[vr {:.1}s] {} | game {:.1} Hz, OpenXR {:.1} Hz, submissions {:.1}/s, fresh stereo {:.1}/s, present {present}; tick {:.1} ms, blit {:.1} ms",
+                start.elapsed().as_secs_f64(),
+                status,
+                rate,
+                display_hz,
+                image_rate,
+                fresh_rate,
+                tick_ms,
+                blit_ms / images.max(1) as f64,
+            );
+            eprintln!("[vr stages]{}", stages.report_and_reset());
+            if let Ok(g) = gfx.0.try_lock() {
+                eprintln!("[vr gfx] {}", g.timing_report());
+            }
+            blit_ms = 0.0;
         }
         if !requested_exit && exit_after.is_some_and(|n| frames >= n) {
             session.request_exit()?;
@@ -467,8 +588,208 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// Exercise the same independent game/render workers and stereo refresh
+/// without opening OpenXR. The caller supplies SSX3_ISO and SSX3_EVENT for
+/// a race; this mode always mutes audio during the offline measurement.
+fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
+    std::env::set_var("SSX3_AUDIO", "0");
+    configure_vr_game();
+    let gpu = ssx3_ps2::gpu::context().ok_or("No GPU for offline VR pipeline")?;
+    let (mut worker, gfx) = GameWorker::boot()?;
+    let eye_size = std::env::var("SSX3_VR_EYE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&v| (512..=3840).contains(&v))
+        .unwrap_or(1024);
+    gfx.set_output_size(Some((eye_size, eye_size)));
+    let projection = ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
+    let mut eyes = std::array::from_fn(|i| {
+        let mut view = ssx3_gfx::vr::IDENTITY;
+        view[3][0] = if i == 0 { 3.2 } else { -3.2 };
+        ssx3_gfx::vr::Eye {
+            view_from_game: view,
+            projection,
+        }
+    });
+    gfx.set_vr_eyes(Some(eyes));
+    ssx3_game::game::main::ssxapp::set_vr_gaze([0.0, 0.0, 1.0]);
+    ssx3_ps2::machine::set_realtime(true);
+    worker.start()?;
+    worker.progress.running.store(true, Ordering::Release);
+    let started = Instant::now();
+    let period = Duration::from_nanos(13_888_889); // local PICO: 72 Hz
+    let timeout = Duration::from_secs(frames_to_run / 20 + 30);
+    let mut next = Instant::now();
+    let mut last_serial = 0;
+    let mut last_shown_eyes = None;
+    let mut submitted = 0u64;
+    let mut fresh = 0u64;
+    let mut refreshes = 0u64;
+    let mut refresh_ms = 0.0;
+    let mut lock_ms = 0.0;
+    let mut gpu_wait_ms = 0.0;
+    let mut pending_max = 0usize;
+    let mut race_mark = None;
+    let turn_at = std::env::var("SSX3_VR_OFFLINE_TURN_AT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+    let mut turned = false;
+    while worker.progress.frames.load(Ordering::Acquire) < frames_to_run {
+        if started.elapsed() > timeout {
+            return Err("Offline VR pipeline timed out".into());
+        }
+        if let Some(error) = worker.progress.error.lock().unwrap().clone() {
+            return Err(error.into());
+        }
+        if worker.thread.as_ref().is_some_and(|t| t.is_finished()) {
+            return Err("Offline VR game worker stopped unexpectedly".into());
+        }
+        let game_frame = worker.progress.frames.load(Ordering::Acquire);
+        if !turned && turn_at.is_some_and(|at| game_frame >= at) {
+            let yaw = std::env::var("SSX3_VR_OFFLINE_TURN_DEG")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(90.0)
+                .to_radians();
+            let (s, c) = yaw.sin_cos();
+            for eye in &mut eyes {
+                eye.view_from_game[0] = [c, 0.0, s, 0.0];
+                eye.view_from_game[2] = [-s, 0.0, c, 0.0];
+            }
+            gfx.set_vr_eyes(Some(eyes));
+            ssx3_game::game::main::ssxapp::set_vr_gaze([s, 0.0, c]);
+            turned = true;
+        }
+        let now = Instant::now();
+        if next < now {
+            next = now;
+        }
+        std::thread::sleep(next.saturating_duration_since(now));
+        next += period;
+        pending_max = pending_max.max(gfx.pending_frames());
+        if gfx.pending_frames() == 0
+            && gfx.present_serial() == last_serial
+            && last_shown_eyes.is_none_or(|shown| vr_camera::eyes_moved(eyes, shown, 100.0))
+        {
+            let t = Instant::now();
+            refreshes += u64::from(gfx.refresh_vr_eyes_if_stale(eyes, last_serial));
+            refresh_ms += t.elapsed().as_secs_f64() * 1000.0;
+        }
+        let lock_start = Instant::now();
+        gfx.with_queue_exclusive(|| {
+            lock_ms += lock_start.elapsed().as_secs_f64() * 1000.0;
+            let serial = gfx.present_serial();
+            if gfx.present_stereo_views().is_some() {
+                submitted += 1;
+                fresh += u64::from(serial != last_serial);
+                last_serial = serial;
+                last_shown_eyes = Some(eyes);
+            }
+            let t = Instant::now();
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            gpu_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+        });
+        let frame = worker.progress.frames.load(Ordering::Acquire);
+        if frame >= 420 && race_mark.is_none() {
+            race_mark = Some((
+                Instant::now(),
+                frame,
+                submitted,
+                fresh,
+                refreshes,
+                lock_ms,
+                gpu_wait_ms,
+            ));
+        }
+    }
+    worker.progress.running.store(false, Ordering::Release);
+    worker.progress.stop.store(true, Ordering::Release);
+    if let Some(thread) = worker.thread.take() {
+        thread
+            .join()
+            .map_err(|_| "Offline VR game worker panicked")?;
+    }
+    gfx.flush();
+    let frames = worker.progress.frames.load(Ordering::Acquire);
+    let elapsed = started.elapsed().as_secs_f64();
+    let images = gfx.stats().frames;
+    println!(
+        "offline VR pipeline: game {frames} ticks ({:.1}/s), renderer {images} frames, presented {submitted} stereo ({:.1}/s), fresh {fresh} ({:.1}/s), {}x{} per eye, {:.2}s; refresh {refreshes} ({:.1}ms total), lock {:.1}ms, GPU wait {:.1}ms, pending max {pending_max}",
+        frames as f64 / elapsed,
+        submitted as f64 / elapsed,
+        fresh as f64 / elapsed,
+        eye_size,
+        eye_size,
+        elapsed,
+        refresh_ms,
+        lock_ms,
+        gpu_wait_ms,
+    );
+    if let Some((at, first, shown, new, views, locked, waited)) = race_mark {
+        let seconds = at.elapsed().as_secs_f64().max(1e-6);
+        println!(
+            "offline race frames {first}..{frames}: game {:.1}/s, stereo {:.1}/s, fresh {:.1}/s, refresh {}, lock {:.1}ms, GPU wait {:.1}ms",
+            (frames - first) as f64 / seconds,
+            (submitted - shown) as f64 / seconds,
+            (fresh - new) as f64 / seconds,
+            refreshes - views,
+            lock_ms - locked,
+            gpu_wait_ms - waited,
+        );
+    }
+    if turned {
+        // Move the head once more after the simulation has stopped: this
+        // must redraw the retained scene without another game tick.
+        let yaw = std::env::var("SSX3_VR_OFFLINE_TURN_DEG")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(90.0)
+            .to_radians()
+            + 5.0f32.to_radians();
+        let (s, c) = yaw.sin_cos();
+        for eye in &mut eyes {
+            eye.view_from_game[0] = [c, 0.0, s, 0.0];
+            eye.view_from_game[2] = [-s, 0.0, c, 0.0];
+        }
+        let serial = gfx.present_serial();
+        if !gfx.refresh_vr_eyes_if_stale(eyes, serial) {
+            return Err("Offline retained-scene head refresh failed".into());
+        }
+        let [left, right] = gfx.read_stereo_images().ok_or("No offline stereo image")?;
+        let nonblack = |pixels: &[u32]| pixels.iter().filter(|&&p| p & 0x00ff_ffff != 0).count();
+        let left_nonblack = nonblack(&left.2);
+        let right_nonblack = nonblack(&right.2);
+        let different = left.2.iter().zip(&right.2).filter(|(a, b)| a != b).count();
+        println!(
+            "offline head turn + retained refresh: left nonblack {}/{}, right nonblack {}/{}, eyes differ at {} pixels",
+            left_nonblack,
+            left.2.len(),
+            right_nonblack,
+            right.2.len(),
+            different,
+        );
+        if left_nonblack < left.2.len() * 9 / 10
+            || right_nonblack < right.2.len() * 9 / 10
+            || different < left.2.len() / 20
+        {
+            return Err("Offline head turn produced an empty or duplicated eye".into());
+        }
+    }
+    Ok(())
+}
+
 fn main() {
-    if let Err(err) = run() {
+    let args: Vec<_> = std::env::args().collect();
+    let result = if args.get(1).is_some_and(|arg| arg == "--offline-pipeline") {
+        let frames = args
+            .get(2)
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(500);
+        run_offline_pipeline(frames)
+    } else {
+        run()
+    };
+    if let Err(err) = result {
         eprintln!("SSX 3 VR: {err}");
         std::process::exit(1);
     }
