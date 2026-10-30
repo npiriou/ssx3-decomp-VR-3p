@@ -601,6 +601,13 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|&v| (512..=3840).contains(&v))
         .unwrap_or(1024);
+    let compositor = xr_wgpu_session::OfflineStereoTarget::new(&gpu.device, eye_size, eye_size);
+    let panel = xr_wgpu_session::PanelConfig {
+        width: 130.0,
+        height: 130.0,
+        distance: 200.0,
+        y: 0.0,
+    };
     gfx.set_output_size(Some((eye_size, eye_size)));
     let projection = ssx3_gfx::vr::projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
     let mut eyes = std::array::from_fn(|i| {
@@ -676,19 +683,41 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             refresh_ms += t.elapsed().as_secs_f64() * 1000.0;
         }
         let lock_start = Instant::now();
-        gfx.with_queue_exclusive(|| {
+        gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
             lock_ms += lock_start.elapsed().as_secs_f64() * 1000.0;
             let serial = gfx.present_serial();
-            if gfx.present_stereo_views().is_some() {
+            let stereo = gfx.present_stereo_views();
+            let hud = gfx.present_vr_ui_view();
+            if let (Some(stereo), Some(hud)) = (stereo.as_ref(), hud.as_ref()) {
+                let panel_eyes = eyes.map(|eye| xr_wgpu_session::PanelEye {
+                    game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game)
+                        .unwrap_or(ssx3_gfx::vr::IDENTITY),
+                    clip: [
+                        eye.projection[0][0],
+                        eye.projection[1][1],
+                        eye.projection[2][0],
+                        eye.projection[2][1],
+                    ],
+                });
+                gpu_wait_ms += compositor.blit_stereo(
+                    &gpu.device,
+                    &gpu.queue,
+                    [&stereo[0].0, &stereo[1].0],
+                    hud,
+                    panel_eyes,
+                    panel,
+                )?;
                 submitted += 1;
                 fresh += u64::from(serial != last_serial);
                 last_serial = serial;
                 last_shown_eyes = Some(eyes);
+            } else {
+                let t = Instant::now();
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                gpu_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
             }
-            let t = Instant::now();
-            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-            gpu_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
-        });
+            Ok(())
+        })?;
         let frame = worker.progress.frames.load(Ordering::Acquire);
         if frame >= 420 && race_mark.is_none() {
             race_mark = Some((
@@ -773,6 +802,33 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             || different < left.2.len() / 20
         {
             return Err("Offline head turn produced an empty or duplicated eye".into());
+        }
+        let stereo = gfx.present_stereo_views().ok_or("No final stereo views")?;
+        let hud = gfx.present_vr_ui_view().ok_or("No final spatial HUD")?;
+        let panel_eyes = eyes.map(|eye| xr_wgpu_session::PanelEye {
+            game_from_eye: ssx3_gfx::vr::inverse(eye.view_from_game)
+                .unwrap_or(ssx3_gfx::vr::IDENTITY),
+            clip: [
+                eye.projection[0][0],
+                eye.projection[1][1],
+                eye.projection[2][0],
+                eye.projection[2][1],
+            ],
+        });
+        compositor.blit_stereo(
+            &gpu.device,
+            &gpu.queue,
+            [&stereo[0].0, &stereo[1].0],
+            &hud,
+            panel_eyes,
+            panel,
+        )?;
+        let (left, right, different, total) = compositor.eye_coverage(&gpu.device, &gpu.queue)?;
+        println!(
+            "offline OpenXR-style composite: left nonblack {left}/{total}, right nonblack {right}/{total}, eyes differ at {different} pixels"
+        );
+        if left < total * 9 / 10 || right < total * 9 / 10 || different < total / 20 {
+            return Err("Offline compositor produced an empty or duplicated eye".into());
         }
     }
     Ok(())

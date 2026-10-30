@@ -17,14 +17,21 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   path redraws the retained scene when the tracked eyes move and no newer
   game image is ready. `ssx3-vr --offline-pipeline 500` exercises this
   scheduling without starting SteamVR and always mutes game audio.
-  At 1920 × 1920 per eye, offline frames 420–501 on Gravitude with a 90°
-  simulated head turn measured 60.0 game ticks/s, 71.1 stereo presentations/s
-  and 58.5 fresh stereo images/s. After the game stopped, another 5° head
-  turn redrew the retained scene: both eyes remained filled and 3,171,485
-  pixels differed between them. An adjacent static ARA1 run measured 59.8
-  ticks/s, 71.8 stereo presentations/s and 59.8 fresh images/s. The offline
-  presenter waits for GPU work but omits OpenXR blit and the headset compositor;
-  headset pacing, comfort and the 60 fresh images/s target remain unverified.
+  The offline presenter now runs the same two-eye world/HUD composition shader
+  into a synthetic 1920 × 1920 × 2 target and waits for its GPU submission.
+  With a simulated 90° head turn, Gravitude frames 421–501 measured 59.4
+  game ticks/s, 71.3 stereo presentations/s and 59.4 fresh stereo images/s;
+  Snow Jam frames 420–502 measured 59.3, 70.2 and 58.6/s respectively.
+  After the game stopped, another 5° turn redrew the retained scene. The
+  composited Gravitude eyes had 3,685,629 and 3,685,620 nonblack pixels out
+  of 3,686,400, with 3,168,165 differing pixels. Snow Jam also retained
+  two filled, distinct eyes. A longer Gravitude run through frame 1001
+  measured 60.0 ticks/s, 71.9 presentations/s and 59.9 fresh stereo
+  images/s over race frames 420–1001; after a 5° retained-scene refresh,
+  both final compositor layers still had over 3.68 million nonblack pixels.
+  OpenXR swapchain waits, frame submission and
+  the headset compositor are absent, so headset pacing, comfort and the 60
+  fresh images/s target remain unverified.
 - Nash retains a headset-directed 75° cone of loaded patches and instances,
   plus nearby objects in every direction, before the game's destructive
   forward cull. Headless ARA1 captures at frames 500, 1000, 1500 confirm

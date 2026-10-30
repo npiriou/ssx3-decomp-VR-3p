@@ -1,5 +1,5 @@
-//! Diagnostic OpenXR session rendered by the same wgpu Vulkan device that
-//! will drive the native game. Each eye receives a different clear color.
+//! OpenXR stereo target and the matching offline world/HUD compositor pass.
+//! Both use the same wgpu device and queue as the native game renderer.
 
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -54,10 +54,326 @@ pub struct StereoTarget {
     swapchain: Arc<Mutex<xr::Swapchain<xr::Vulkan>>>,
     width: u32,
     height: u32,
-    panel_layout: wgpu::BindGroupLayout,
-    panel_pipeline: wgpu::RenderPipeline,
-    panel_sampler: wgpu::Sampler,
-    panel_uniforms: [wgpu::Buffer; 2],
+    panel: PanelPass,
+}
+
+/// The OpenXR and offline paths use the same final stereo/HUD shader.
+struct PanelPass {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    uniforms: [wgpu::Buffer; 2],
+}
+
+impl PanelPass {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("SSX 3 VR game image layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<PanelUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("SSX 3 VR game image sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SSX 3 VR game image"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("vr_panel.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("SSX 3 VR game image pipeline layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("SSX 3 VR game image pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let uniforms = std::array::from_fn(|eye| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(if eye == 0 {
+                    "SSX 3 VR left UI panel"
+                } else {
+                    "SSX 3 VR right UI panel"
+                }),
+                size: std::mem::size_of::<PanelUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        Self {
+            layout,
+            pipeline,
+            sampler,
+            uniforms,
+        }
+    }
+
+    fn encode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        sources: Option<[&wgpu::TextureView; 2]>,
+        hud: &wgpu::TextureView,
+        panel_eyes: [PanelEye; 2],
+        panel: PanelConfig,
+    ) {
+        for eye in 0..2 {
+            let uniform = PanelUniform {
+                game_from_eye: panel_eyes[eye].game_from_eye,
+                clip: panel_eyes[eye].clip,
+                size_distance_height: [panel.width, panel.height, panel.distance, panel.y],
+                world_valid: [if sources.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &uniform as *const PanelUniform as *const u8,
+                    std::mem::size_of::<PanelUniform>(),
+                )
+            };
+            queue.write_buffer(&self.uniforms[eye], 0, bytes);
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSX 3 VR eye scene"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            sources.map_or(hud, |s| s[eye]),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(hud),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.uniforms[eye].as_entire_binding(),
+                    },
+                ],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: eye as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SSX 3 VR game image eye"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+}
+
+/// Synthetic swapchain target for measuring the actual stereo/HUD pass
+/// without opening SteamVR.
+pub struct OfflineStereoTarget {
+    texture: wgpu::Texture,
+    panel: PanelPass,
+    width: u32,
+    height: u32,
+}
+
+impl OfflineStereoTarget {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SSX 3 VR offline stereo compositor"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        Self {
+            texture,
+            panel: PanelPass::new(device, format),
+            width,
+            height,
+        }
+    }
+
+    /// Uses the live shader and target extent, then waits for its submission
+    /// just as the OpenXR handoff does. Swapchain waits and the compositor's
+    /// own work are still absent from this measurement.
+    pub fn blit_stereo(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sources: [&wgpu::TextureView; 2],
+        hud: &wgpu::TextureView,
+        panel_eyes: [PanelEye; 2],
+        panel: PanelConfig,
+    ) -> Result<f64, Box<dyn Error>> {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("SSX 3 VR offline stereo blit"),
+        });
+        self.panel.encode(
+            device,
+            queue,
+            &mut encoder,
+            &self.texture,
+            Some(sources),
+            hud,
+            panel_eyes,
+            panel,
+        );
+        let submitted = queue.submit(Some(encoder.finish()));
+        let started = Instant::now();
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submitted),
+            timeout: None,
+        })?;
+        Ok(started.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    /// Inspect the two *composited* layers, including the spatial HUD. This
+    /// catches an eye that is blank after the last-stage shader even when the
+    /// source eye textures are correct.
+    pub fn eye_coverage(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(usize, usize, usize, usize), Box<dyn Error>> {
+        let row = (self.width * 4).next_multiple_of(256);
+        let layer_bytes = row as u64 * self.height as u64;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SSX 3 VR offline compositor readback"),
+            size: layer_bytes * 2,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 2,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely())?;
+        let bytes = slice.get_mapped_range()?;
+        let mut left = 0;
+        let mut right = 0;
+        let mut different = 0;
+        for y in 0..self.height as usize {
+            for x in 0..self.width as usize {
+                let offset = y * row as usize + x * 4;
+                let a = &bytes[offset..offset + 3];
+                let b = &bytes[layer_bytes as usize + offset..layer_bytes as usize + offset + 3];
+                left += usize::from(a != [0, 0, 0]);
+                right += usize::from(b != [0, 0, 0]);
+                different += usize::from(a != b);
+            }
+        }
+        Ok((left, right, different, (self.width * self.height) as usize))
+    }
 }
 
 impl StereoTarget {
@@ -167,101 +483,7 @@ impl StereoTarget {
                 }
             })
             .collect::<Vec<_>>();
-        let panel_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("SSX 3 VR game image layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<PanelUniform>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let panel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("SSX 3 VR game image sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SSX 3 VR game image"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("vr_panel.wgsl").into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("SSX 3 VR game image pipeline layout"),
-            bind_group_layouts: &[Some(&panel_layout)],
-            immediate_size: 0,
-        });
-        let panel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("SSX 3 VR game image pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let panel_uniforms = std::array::from_fn(|eye| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(if eye == 0 {
-                    "SSX 3 VR left UI panel"
-                } else {
-                    "SSX 3 VR right UI panel"
-                }),
-                size: std::mem::size_of::<PanelUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
+        let panel = PanelPass::new(device, format);
         println!(
             "OpenXR wgpu swapchain: {width}x{height}x2, {vk_format:?}, {} images",
             textures.len()
@@ -271,10 +493,7 @@ impl StereoTarget {
             swapchain,
             width,
             height,
-            panel_layout,
-            panel_pipeline,
-            panel_sampler,
-            panel_uniforms,
+            panel,
         })
     }
 
@@ -370,74 +589,16 @@ impl StereoTarget {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("SSX 3 VR game image blit"),
             });
-        for eye in 0..2 {
-            let uniform = PanelUniform {
-                game_from_eye: panel_eyes[eye].game_from_eye,
-                clip: panel_eyes[eye].clip,
-                size_distance_height: [panel.width, panel.height, panel.distance, panel.y],
-                world_valid: [if sources.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
-            };
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    &uniform as *const PanelUniform as *const u8,
-                    std::mem::size_of::<PanelUniform>(),
-                )
-            };
-            graphics
-                .queue
-                .write_buffer(&self.panel_uniforms[eye], 0, bytes);
-            let bind_group = graphics
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("SSX 3 VR eye scene"),
-                    layout: &self.panel_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(
-                                sources.map_or(hud, |s| s[eye]),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.panel_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(hud),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.panel_uniforms[eye].as_entire_binding(),
-                        },
-                    ],
-                });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor {
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: eye as u32,
-                array_layer_count: Some(1),
-                ..Default::default()
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("SSX 3 VR game image eye"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.panel_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        self.panel.encode(
+            &graphics.device,
+            &graphics.queue,
+            &mut encoder,
+            texture,
+            sources,
+            hud,
+            panel_eyes,
+            panel,
+        );
         let submitted = graphics.queue.submit(Some(encoder.finish()));
         let gpu_start = Instant::now();
         graphics.device.poll(wgpu::PollType::Wait {

@@ -30,7 +30,8 @@ against a simulated 72 Hz presenter, without SteamVR. It mutes audio and
 reports game, stereo presentation and fresh stereo rates after race frame 420.
 Set `SSX3_VR_OFFLINE_TURN_AT=450` and optionally
 `SSX3_VR_OFFLINE_TURN_DEG=90` to simulate a head turn during that run.
-The measurements exclude OpenXR blit and headset compositor time.
+The test runs the live two-eye world/HUD composition shader and waits for
+its GPU work. It excludes OpenXR swapchain and headset compositor time.
 
 | Variable | Effect |
 | --- | --- |
