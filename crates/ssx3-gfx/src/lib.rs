@@ -236,6 +236,8 @@ struct DrawFrameInputs {
     world_casters: Option<Arc<ssx3_render::world_casters::Casters>>,
     painter_sun: Option<ssx3_render::world_casters::PainterSun>,
     flare_light: Option<(f32, f32, u32)>,
+    /// Silhouette targets are classified once for all eye and HUD draws.
+    silhouette_rts: std::collections::HashSet<u32>,
 }
 
 /// What the render thread shares with the game and the window without
@@ -250,6 +252,8 @@ pub struct Shared {
     queue_access: Arc<Mutex<()>>,
     /// Frames sent and not yet rendered.
     pending: Mutex<usize>,
+    /// Time the game thread spent waiting for the bounded render queue.
+    publish_wait_us: std::sync::atomic::AtomicU64,
     idle: std::sync::Condvar,
     /// The latest depth readback and the number of the frame it is from
     /// (frames counted as `render_built` receives them).
@@ -480,6 +484,12 @@ impl Renderer {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub fn publish_wait_us(&self) -> u64 {
+        self.1
+            .publish_wait_us
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn present_vr_eyes(&self) -> Option<[vr::Eye; 2]> {
         *self.1.present_eyes.lock().unwrap()
     }
@@ -691,7 +701,13 @@ impl ssx3_ps2::frame_sink::FrameSink for Renderer {
         match tx {
             Some(tx) => {
                 *self.1.pending.lock().unwrap() += 1;
-                if tx.send(f).is_err() {
+                let started = web_time::Instant::now();
+                let sent = tx.send(f);
+                self.1.publish_wait_us.fetch_add(
+                    started.elapsed().as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if sent.is_err() {
                     *self.1.pending.lock().unwrap() -= 1;
                 }
             }
@@ -1445,6 +1461,23 @@ impl Inner {
         Build::run(&mut b, built, mem, eyes);
         self.put_build(b);
         self.timing.1[0] += t_start.elapsed().as_secs_f64() * 1e3;
+        // This classification depends only on the published batch list.
+        // Reusing it avoids scanning the whole world for each eye and HUD.
+        let geometry = self.gs.take_geometry();
+        let silhouette_rts = if self.opts.shadows && !shadow::debug("game-shadows") {
+            geometry
+                .batches
+                .iter()
+                .filter(|b| {
+                    b.gpu
+                        .is_some_and(|g| g.program == ssx3_render::gpu::Program::Mat6Shadow)
+                })
+                .map(|b| b.state.target)
+                .filter(|&target| target != geometry.state.main_fbp)
+                .collect()
+        } else {
+            Default::default()
+        };
         let inputs = DrawFrameInputs {
             phase1_end: self.phase1_end,
             display_fbp: self.display_fbp,
@@ -1453,10 +1486,10 @@ impl Inner {
             world_casters: built.casters.clone(),
             painter_sun: built.sun,
             flare_light: ssx3_ps2::frame_sink::take_light(),
+            silhouette_rts,
         };
         // Ordered GS state carries into the next game frame. The complete
         // geometry belongs to this prepared scene and is shared by its eyes.
-        let geometry = self.gs.take_geometry();
         // The last perspective record is the active scene projection. The
         // first one may use a shorter near plane for sky/background draws.
         let source = built
@@ -1491,30 +1524,17 @@ impl Inner {
                     );
                 }
                 self.vr_eye = None;
-                // The spatial HUD pass reads only main-target HUD batches.
-                // Keep their original order, but avoid scanning and planning
-                // the full world list for a third time at a smaller target.
-                // The shadow path also derives a silhouette-target set from
-                // world batches, so keep its full input until that set is
-                // prepared separately from the HUD draw.
-                let hud_batches: Option<Vec<_>> = (!self.opts.shadows).then(|| {
-                    geometry
-                        .batches
-                        .iter()
-                        .filter(|b| b.state.target == geometry.state.main_fbp && b.tag.hud)
-                        .cloned()
-                        .collect()
-                });
+                // The spatial HUD pass only needs main-target HUD batches.
+                // The world-derived silhouette targets are already in inputs.
+                let hud_batches: Vec<_> = geometry
+                    .batches
+                    .iter()
+                    .filter(|b| b.state.target == geometry.state.main_fbp && b.tag.hud)
+                    .cloned()
+                    .collect();
                 self.vr_ui = true;
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
-                self.draw_built(
-                    mem,
-                    &geometry,
-                    &inputs,
-                    hud_batches.as_deref().unwrap_or(&geometry.batches),
-                    true,
-                    false,
-                );
+                self.draw_built(mem, &geometry, &inputs, &hud_batches, true, false);
                 std::mem::swap(&mut self.targets, &mut self.ui_targets);
                 self.vr_ui = false;
                 self.vr_pending_scene = Some((geometry, inputs));
@@ -1929,20 +1949,7 @@ impl Inner {
         // targets its silhouettes (mat6 entry 0x20) are drawn into, and every
         // draw that projects them (`SSX3_SHADOW_DEBUG=game-shadows` keeps
         // them).
-        let silhouette_rts: std::collections::HashSet<u32> =
-            if light.is_some() && !shadow::debug("game-shadows") {
-                batches
-                    .iter()
-                    .filter(|b| {
-                        b.gpu
-                            .is_some_and(|g| g.program == ssx3_render::gpu::Program::Mat6Shadow)
-                    })
-                    .map(|b| b.state.target)
-                    .filter(|&t| t != scene.main_fbp)
-                    .collect()
-            } else {
-                Default::default()
-            };
+        let silhouette_rts = &inputs.silhouette_rts;
         self.stats.batches += batches.len() as u64;
         struct Item {
             /// Samples the frame: needs a fresh snapshot unless the previous
@@ -2011,7 +2018,8 @@ impl Inner {
             if !opts.keeps_post(b.tag.post) {
                 continue;
             }
-            if !silhouette_rts.is_empty()
+            if light.is_some()
+                && !silhouette_rts.is_empty()
                 && (silhouette_rts.contains(&st.target)
                     || st.tex.is_some_and(|t| {
                         t != gs::FRAME_TEX

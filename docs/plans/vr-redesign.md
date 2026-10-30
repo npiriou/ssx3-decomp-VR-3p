@@ -653,6 +653,24 @@ and sample blue sky at the upper centre. This verifies stereo output for
 that scene; G1 coverage on other courses and G3 sustained SteamVR pacing
 remain open.
 
+### Gravitude renderer backpressure (2026-10-31)
+
+The bounded frame queue now records how long the game thread blocks while
+publishing a visual frame. On a muted 1920-square Gravitude run with a 180°
+turn, race frames 420–651 measured 58.0 game ticks/s, 57.3 fresh stereo
+images/s, and 440.2 ms total publication wait. The queue is therefore a
+measured contributor to the missed rate, beyond the game's own tick work.
+The renderer now classifies shadow silhouette targets once per published
+scene and sends only main-target HUD batches to its spatial UI draw, even
+with shadows enabled. A frozen frame-650 replay produced byte-identical
+left, right and UI images at 1024 square. An adjacent live run measured
+56.9 fresh images/s and 454.5 ms publication wait on the same race window;
+this small structural cut does not improve the live rate. A trial that
+released the shared queue lock during the offline compositor's GPU wait
+also failed to improve throughput and was removed. The next G3 work needs
+to reduce repeated eye draw planning, binding and submission while keeping
+ordered GS resource updates and the two independently projected views.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

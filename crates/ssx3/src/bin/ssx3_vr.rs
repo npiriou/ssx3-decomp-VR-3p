@@ -454,6 +454,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut last_present_serial = 0u64;
     let mut game_rate_mark = Instant::now();
     let mut last_game_frames = 0u64;
+    let mut last_publish_wait_us = 0u64;
     let mut last_submitted = 0u64;
     let mut blit_ms = 0.0f64;
     let mut stages = StageWindow::new();
@@ -487,6 +488,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             progress.running.store(true, Ordering::Release);
                             game_rate_mark = Instant::now();
                             last_game_frames = progress.frames.load(Ordering::Acquire);
+                            last_publish_wait_us = gfx.publish_wait_us();
                         }
                         xr::SessionState::FOCUSED => {
                             anchor = None;
@@ -659,6 +661,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             let fresh_rate = (fresh_stereo - last_fresh_stereo) as f64 / elapsed;
             let tick_ms =
                 progress.tick_us.swap(0, Ordering::Relaxed) as f64 / ticks.max(1) as f64 / 1000.0;
+            let publish_wait_us = gfx.publish_wait_us();
+            let publish_wait_ms =
+                (publish_wait_us - last_publish_wait_us) as f64 / ticks.max(1) as f64 / 1000.0;
+            last_publish_wait_us = publish_wait_us;
             last_game_frames = frames;
             last_submitted = submitted;
             last_fresh_stereo = fresh_stereo;
@@ -668,7 +674,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .map(|p| format!("{}x{} stereo", p[0].1, p[0].2))
                 .unwrap_or_else(|| "none".into());
             eprintln!(
-                "[vr {:.1}s] {} | game {:.1} Hz, OpenXR {:.1} Hz, submissions {:.1}/s, fresh stereo {:.1}/s, present {present}; tick {:.1} ms, blit {:.1} ms",
+                "[vr {:.1}s] {} | game {:.1} Hz, OpenXR {:.1} Hz, submissions {:.1}/s, fresh stereo {:.1}/s, present {present}; tick {:.1} ms, publish wait {:.1} ms/tick, blit {:.1} ms",
                 start.elapsed().as_secs_f64(),
                 status,
                 rate,
@@ -676,6 +682,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 image_rate,
                 fresh_rate,
                 tick_ms,
+                publish_wait_ms,
                 blit_ms / images.max(1) as f64,
             );
             eprintln!("[vr stages]{}", stages.report_and_reset());
@@ -865,6 +872,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                 refreshes,
                 lock_ms,
                 gpu_wait_ms,
+                gfx.publish_wait_us(),
             ));
         }
     }
@@ -889,7 +897,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     let game_ms = worker.progress.tick_us.load(Ordering::Relaxed) as f64 / 1000.0;
     let status = worker.progress.status.lock().unwrap().clone();
     println!(
-        "offline VR pipeline: game {frames} ticks ({:.1}/s, {:.1}ms CPU/tick), renderer {images} frames, presented {submitted} stereo ({:.1}/s), fresh {fresh} ({:.1}/s), {}x{} per eye, {:.2}s; refresh {refreshes} ({:.1}ms total), gaze waits {gaze_waits} ({gaze_wait_ms:.1}ms, {gaze_wait_misses} misses), lock {:.1}ms, GPU wait {:.1}ms, pending max {pending_max}, status {status:?}",
+        "offline VR pipeline: game {frames} ticks ({:.1}/s, {:.1}ms CPU/tick), renderer {images} frames, presented {submitted} stereo ({:.1}/s), fresh {fresh} ({:.1}/s), {}x{} per eye, {:.2}s; refresh {refreshes} ({:.1}ms total), gaze waits {gaze_waits} ({gaze_wait_ms:.1}ms, {gaze_wait_misses} misses), publish wait {:.1}ms, lock {:.1}ms, GPU wait {:.1}ms, pending max {pending_max}, status {status:?}",
         frames as f64 / elapsed,
         game_ms / frames.max(1) as f64,
         submitted as f64 / elapsed,
@@ -898,17 +906,19 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         eye_size,
         elapsed,
         refresh_ms,
+        gfx.publish_wait_us() as f64 / 1000.0,
         lock_ms,
         gpu_wait_ms,
     );
-    if let Some((at, first, shown, new, views, locked, waited)) = race_mark {
+    if let Some((at, first, shown, new, views, locked, waited, publish_waited)) = race_mark {
         let seconds = at.elapsed().as_secs_f64().max(1e-6);
         println!(
-            "offline frames {first}..{frames}: game {:.1}/s, stereo {:.1}/s, fresh {:.1}/s, refresh {}, lock {:.1}ms, GPU wait {:.1}ms",
+            "offline frames {first}..{frames}: game {:.1}/s, stereo {:.1}/s, fresh {:.1}/s, refresh {}, publish wait {:.1}ms, lock {:.1}ms, GPU wait {:.1}ms",
             (frames - first) as f64 / seconds,
             (submitted - shown) as f64 / seconds,
             (fresh - new) as f64 / seconds,
             refreshes - views,
+            (gfx.publish_wait_us() - publish_waited) as f64 / 1000.0,
             lock_ms - locked,
             gpu_wait_ms - waited,
         );
