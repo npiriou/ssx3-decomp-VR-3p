@@ -3865,6 +3865,12 @@ impl Build {
                                                         xyoffset,
                                                         b.gs.size,
                                                         !gravitude_panorama,
+                                                        gravitude_panorama
+                                                            && std::env::var(
+                                                                "SSX3_VR_SKY_GRAVITUDE_SMOOTH",
+                                                            )
+                                                            .as_deref()
+                                                                != Ok("0"),
                                                     )
                                                 } else {
                                                     vr::sky_panorama_panels(&c, matrix.view_proj)

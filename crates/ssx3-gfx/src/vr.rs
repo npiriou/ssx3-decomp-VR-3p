@@ -423,6 +423,7 @@ pub fn sky_native_panorama_panels(
     xyoffset: [f32; 2],
     gs_size: (u32, u32),
     fade_upper_edge: bool,
+    join_gravitude_upper: bool,
 ) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
     use ssx3_render::gpu::{Link, Program};
     if call.program != Program::Mat3Mesh
@@ -466,6 +467,18 @@ pub fn sky_native_panorama_panels(
     const HORIZONTAL: u32 = 8;
     const VERTICAL: u32 = 16;
     let upper = call.data.len() == 6 * 4;
+    let smooth_gravitude = upper && join_gravitude_upper;
+    // These source upper strips cover [-90°, 45°] in three contiguous
+    // sectors. At their two shared boundaries, fading each strip to the
+    // plain blue dome makes a dark vertical notch. Their outer boundaries
+    // still need the fade because the remaining directions have no strips.
+    let shared_edge = |angle: f32| {
+        let angle =
+            (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        angle.abs() < 0.02 || (angle + std::f32::consts::FRAC_PI_4).abs() < 0.02
+    };
+    let keep_start = smooth_gravitude && shared_edge(start);
+    let keep_end = smooth_gravitude && shared_edge(end);
     let template = call.data.chunks_exact(4).next()?;
     for row in 0..=VERTICAL {
         let t = row as f32 / VERTICAL as f32;
@@ -485,7 +498,9 @@ pub fn sky_native_panorama_panels(
             }
             vertex[1][0] = ((1.0 - s) * 4096.0).round() as u32;
             vertex[1][1] = (t * 4096.0).round() as u32;
-            let edge = (s / 0.25).min((1.0 - s) / 0.25).clamp(0.0, 1.0);
+            let edge = (if keep_start { 1.0 } else { s / 0.25 })
+                .min(if keep_end { 1.0 } else { (1.0 - s) / 0.25 })
+                .clamp(0.0, 1.0);
             let vertical = if upper {
                 1.0
             } else if fade_upper_edge {
@@ -857,7 +872,7 @@ mod tests {
         }
         call.uniforms[4][1] = 6;
         let p = projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
-        let panels = sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), true)
+        let panels = sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), true, false)
             .expect("Ruthless Ridge peak strip");
         assert_eq!(panels.len(), 1);
         let panel = &panels[0];
@@ -870,6 +885,26 @@ mod tests {
         assert_eq!(panel.data[4 * 4 + 2][3], 128);
         let bottom_left = 16 * 9 * 4;
         assert_eq!(panel.data[bottom_left + 1][0..2], [4096, 4096]);
+        // Gravitude's neighbouring upper strips meet at -45° and 0°.
+        // Keep their artwork opaque there; an unpaired outer edge must
+        // still fade into the blue dome instead of exposing a hard wedge.
+        let joined_upper =
+            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), false, true)
+                .expect("joined upper sector");
+        assert_eq!(joined_upper[0].data[2][3], 128);
+        assert_eq!(joined_upper[0].data[8 * 4 + 2][3], 128);
+        let mut outer = call.clone();
+        for vertex in outer.data.chunks_exact_mut(4) {
+            let x = vertex[0][0] as i32 as f32 / 32768.0;
+            let y = vertex[0][1] as i32 as f32 / 32768.0;
+            let (s, c) = std::f32::consts::FRAC_PI_4.sin_cos();
+            vertex[0][0] = (((c * x + s * y) * 32768.0).round() as i32) as u32;
+            vertex[0][1] = (((-s * x + c * y) * 32768.0).round() as i32) as u32;
+        }
+        let outer = sky_native_panorama_panels(&outer, p, [0.0, 0.0], (1024, 1024), false, true)
+            .expect("outer upper sector");
+        assert_eq!(outer[0].data[2][3], 0);
+        assert_eq!(outer[0].data[8 * 4 + 2][3], 128);
         for (source, wrapped) in [(1, 0), (0, bottom_left)] {
             let original = call.data[source * 4].map(|v| v as i32 as f32 / 32768.0);
             let hc = transform(screen, [original[0], original[1], original[2], 1.0]);
@@ -907,9 +942,9 @@ mod tests {
             }
         }
         lower.uniforms[4][1] = 15;
-        let faded = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), true)
+        let faded = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), true, false)
             .expect("lower sector");
-        let joined = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false)
+        let joined = sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false, false)
             .expect("joined lower sector");
         assert_eq!(faded[0].data[4 * 4 + 2][3], 0);
         assert_eq!(joined[0].data[4 * 4 + 2][3], 128);

@@ -488,6 +488,23 @@ remained poor. Removing the cliff revealed a snowy background but erased real
 course geometry; front-face culling likewise left holes. No mesh experiment
 was installed. A source-space silhouette and material solution remains G1 work.
 
+### Gravitude upper-sky joins (2026-10-31)
+
+The upper panorama consists of four 45-degree strips, three contiguous over
+angles -90 to 45 degrees and one isolated at 180 to 225 degrees. The prior
+edge alpha faded both sides of each strip into the plain dome, creating a dark
+vertical notch at the two shared borders (-45 and 0 degrees). Gravitude now
+keeps alpha at those joins while retaining the fade at unpaired outer edges.
+Frozen frame-650 stereo replays at 1920 square per eye show the notch gone in
+the forward view. The 90-degree side images are byte-identical to the old
+fade in both eyes, and the missing outer-sector wedge stays hidden. Both
+forward eyes are fully covered and distinct. A muted 650-tick offline run at
+the same size measured 59.9 game ticks/s, 71.5 stereo submissions/s and 59.6
+fresh stereo images/s over frames 420-651, comparable to the preceding run.
+The lower/upper artwork still has a horizontal transition and the side course
+wall remains coarse; G1 is open. `SSX3_VR_SKY_GRAVITUDE_SMOOTH=0` restores
+the former fade.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

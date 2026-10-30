@@ -150,6 +150,9 @@ is generated from the owner's disc; see [`plans/vr-redesign.md`](plans/vr-redesi
 VR decodes replacement PNGs and builds their mipmaps before the game/render
 pipeline starts, up to 64 MiB of decoded textures; the remainder loads on first
 use. `SSX3_VR_PRELOAD_TEXTURES=0` restores first-use loading for comparison.
+Gravitude's upper sky sectors now keep their shared borders filled, removing
+the dark vertical gap in the forward view. `SSX3_VR_SKY_GRAVITUDE_SMOOTH=0`
+restores the old edge fade for comparison.
 
 Alpha in the PNGs is the GS's doubled (255 = opaque). Render targets, the frame-feedback
 passes and movie frames are not textures and are not dumped. `textures/` is ignored by git
