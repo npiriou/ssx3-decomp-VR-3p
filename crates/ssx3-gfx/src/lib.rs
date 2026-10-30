@@ -3487,8 +3487,12 @@ impl Build {
                     .rposition(|(owner, _)| matches!(owner, Owner::Payload(0)))
             })
             .flatten();
-        let refine_terrain =
-            vr_active && std::env::var("SSX3_VR_TERRAIN_MESH").is_ok_and(|v| v == "1");
+        let terrain_mode = if vr_active {
+            std::env::var("SSX3_VR_TERRAIN_MESH").unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let refine_terrain = matches!(terrain_mode.as_str(), "1" | "cpu" | "gpu");
         let terrain_reprojections: Vec<Option<[[[f32; 4]; 4]; 2]>> = if refine_terrain {
             built
                 .frame
@@ -3507,12 +3511,18 @@ impl Build {
             Vec::new()
         };
         let mut terrain_mesh = None;
+        let mut terrain_gpu_mesh = None;
         let mut terrain_stats = terrain_vr::Stats::default();
         let mut terrain_remaining = std::env::var("SSX3_VR_TERRAIN_BUDGET")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(256)
             .min(1200);
+        let terrain_error = std::env::var("SSX3_VR_TERRAIN_ERROR")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(10.0);
         std::thread::scope(|sc| {
             // The helper workers (the browser) take every chunk up front;
             // without threads, this thread does.
@@ -3616,14 +3626,26 @@ impl Build {
                                                 offset,
                                             })
                                         });
-                                    terrain_vr::refine_calls(
-                                        &mut g,
-                                        coeffs,
-                                        projected.as_ref(),
-                                        &mut terrain_mesh,
-                                        &mut terrain_remaining,
-                                        &mut terrain_stats,
-                                    );
+                                    if terrain_mode == "gpu" {
+                                        terrain_vr::refine_calls_gpu(
+                                            &mut g,
+                                            coeffs,
+                                            projected.as_ref(),
+                                            terrain_error,
+                                            &mut terrain_gpu_mesh,
+                                            &mut terrain_remaining,
+                                            &mut terrain_stats,
+                                        );
+                                    } else {
+                                        terrain_vr::refine_calls(
+                                            &mut g,
+                                            coeffs,
+                                            projected.as_ref(),
+                                            &mut terrain_mesh,
+                                            &mut terrain_remaining,
+                                            &mut terrain_stats,
+                                        );
+                                    }
                                 }
                                 for c in g {
                                     if vr_sky_dome && matches!(owner, Owner::Payload(0)) {
@@ -3818,11 +3840,15 @@ impl Build {
             vu.finish(&plan, &mut b.vu);
         });
         if refine_terrain && std::env::var_os("SSX3_VR_TERRAIN_STATS").is_some() {
-            eprintln!("[vr-terrain-mesh] {} patches, {} refined triangles, {} visible sources, {} rejected sources, {} candidates, {} measured, {:.2} max error, {} triangle budget remaining, {} projected matrices",
+            eprintln!("[vr-terrain-mesh:{terrain_mode}] {} patches, {} refined triangles, {} visible sources, {} rejected sources, {} candidates, {} measured, {:.2} max error, {} triangle budget remaining, {} projected matrices",
                 terrain_stats.patches, terrain_stats.triangles, terrain_stats.visible_sources,
                 terrain_stats.rejected, terrain_stats.candidates, terrain_stats.measured,
                 terrain_stats.max_error, terrain_remaining,
                 terrain_reprojections.iter().filter(|m| m.is_some()).count());
+            eprintln!(
+                "[vr-terrain-mesh:{terrain_mode}] triangle errors >=1/2/5/10/20/40 px: {:?}",
+                terrain_stats.error_bins
+            );
         }
         // Whatever is left runs before the next frame.
         label(&mut b.gs, "path3".into());

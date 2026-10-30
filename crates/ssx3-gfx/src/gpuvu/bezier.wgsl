@@ -147,11 +147,66 @@ fn bz_clipper() -> u32 {
     return n;
 }
 
+// Mode 3: a compact VR-only subdivision. The CPU supplies three midpoint
+// positions per selected triangle; the shader builds each subtriangle's UVs
+// and normals for both eyes and both texture passes.
+fn bz_refined_vertex(vi: u32, c: u32) -> VOut {
+    let info = uq(c, 7u);
+    let i = (vi >> 4u) & 4095u;
+    let id = vi >> 16u;
+    let r = vi & 15u;
+    let src = select(uq(c, 30u).y, uq(c, 30u).z, info.w != 0u);
+    let a = i - 2u;
+    let p0 = bitcast<vec4<f32>>(data[src + 3u * a]);
+    let p1 = bitcast<vec4<f32>>(data[src + 3u * (a + 1u)]);
+    let p2 = bitcast<vec4<f32>>(data[src + 3u * (a + 2u)]);
+    let weights = array<vec3<f32>, 12>(
+        vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.5, 0.5, 0.0), vec3<f32>(0.5, 0.0, 0.5),
+        vec3<f32>(0.5, 0.5, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.5, 0.5),
+        vec3<f32>(0.5, 0.0, 0.5), vec3<f32>(0.0, 0.5, 0.5), vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(0.5, 0.5, 0.0), vec3<f32>(0.0, 0.5, 0.5), vec3<f32>(0.5, 0.0, 0.5),
+    );
+    let w = weights[r];
+    var p = w.x * p0 + w.y * p1 + w.z * p2;
+    let ab = w.x == 0.5 && w.y == 0.5;
+    let bc = w.y == 0.5 && w.z == 0.5;
+    let ca = w.z == 0.5 && w.x == 0.5;
+    if (ab || bc || ca) {
+        let edge = select(select(0u, 1u, bc), 2u, ca);
+        p = bitcast<vec4<f32>>(data[src + 3u * info.z + 3u * (id - 1u) + edge]);
+    }
+    let h = fq(c, 0u) * p.x + fq(c, 1u) * p.y + fq(c, 2u) * p.z + fq(c, 3u) * p.w;
+    let q = 1.0 / select(h.w, bz_eye_clip(c, h).w, b.vr_mode != 0u);
+    let st0 = bitcast<vec4<f32>>(data[src + 3u * a + 1u]);
+    let st1 = bitcast<vec4<f32>>(data[src + 3u * (a + 1u) + 1u]);
+    let st2 = bitcast<vec4<f32>>(data[src + 3u * (a + 2u) + 1u]);
+    let st = w.x * st0 + w.y * st1 + w.z * st2;
+    var stq = st.xyz * q;
+    if (info.y != 0u) {
+        let uv20 = bitcast<vec4<f32>>(data[uq(c, 30u).y + a]);
+        let uv21 = bitcast<vec4<f32>>(data[uq(c, 30u).y + a + 1u]);
+        let uv22 = bitcast<vec4<f32>>(data[uq(c, 30u).y + a + 2u]);
+        let st2 = w.x * uv20 + w.y * uv21 + w.z * uv22;
+        stq = vec3<f32>(st2.xy * (st.w * q), st.z * q);
+    }
+    var o = bz_out(c, h, stq, false);
+    let n0 = bitcast<vec4<f32>>(data[src + 3u * a + 2u]).xyz;
+    let n1 = bitcast<vec4<f32>>(data[src + 3u * (a + 1u) + 2u]).xyz;
+    let n2 = bitcast<vec4<f32>>(data[src + 3u * (a + 2u) + 2u]).xyz;
+    let n = w.x * n0 + w.y * n1 + w.z * n2;
+    o.nrm = vec4<f32>(select(vec3<f32>(0.0), normalize(n), dot(n, n) > 1e-20), 1.0);
+    return o;
+}
+
 fn bezier_vertex(vi: u32, c: u32) -> VOut {
     let info = uq(c, 7);
+    if (info.x == 3u && (vi & 15u) < 12u) {
+        return bz_refined_vertex(vi, c);
+    }
+    let original_vi = select(vi, (((vi >> 4u) & 4095u) << 2u) | ((vi & 15u) - 12u), info.x == 3u);
     let fans = info.x == 2u;
-    let i = select(vi >> 2u, vi >> 5u, fans);
-    let r = select(vi & 3u, vi & 31u, fans);
+    let i = select(original_vi >> 2u, original_vi >> 5u, fans);
+    let r = select(original_vi & 3u, original_vi & 31u, fans);
     let src = select(uq(c, 30).y, uq(c, 30).z, info.w != 0u);
     let h0 = bz_clip(c, src, i - 2u);
     let h1 = bz_clip(c, src, i - 1u);

@@ -22,6 +22,21 @@ pub struct Mesh {
     appended: Vec<Blend>,
 }
 
+/// Compact GPU refinement: the renderer evaluates each shared cubic midpoint
+/// once, then the shader assembles the subtriangles from the original data
+/// and those positions. No expanded vertex array is built on the CPU.
+pub struct GpuMesh {
+    source_vertices: usize,
+    /// Triangle terminal vertex -> one-based midpoint triplet index.
+    selected: HashMap<u32, u32>,
+}
+
+struct Choice {
+    source_vertices: usize,
+    selected: Vec<(u32, [usize; 3])>,
+    curved: HashSet<(u32, u32)>,
+}
+
 #[derive(Default)]
 pub struct Stats {
     pub patches: usize,
@@ -31,6 +46,8 @@ pub struct Stats {
     pub measured: usize,
     pub max_error: f32,
     pub visible_sources: usize,
+    /// Measured triangle counts at >= 1, 2, 5, 10, 20, 40 nominal eye pixels.
+    pub error_bins: [usize; 6],
 }
 
 #[derive(Clone, Copy)]
@@ -165,6 +182,22 @@ fn edge_key(data: &[Q], a: usize, b: usize) -> (u32, u32) {
     (x.min(y), x.max(y))
 }
 
+fn midpoint_position(
+    data: &[Q],
+    coeffs: &[[u32; 4]; 16],
+    a: usize,
+    b: usize,
+    curved: &HashSet<(u32, u32)>,
+) -> Q {
+    let mut p = blend3(point(data, a), point(data, b), 0.5);
+    if curved.contains(&edge_key(data, a, b)) {
+        let pa = params(data, a).unwrap();
+        let pb = params(data, b).unwrap();
+        p[..3].copy_from_slice(&eval(coeffs, [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5])[..3]);
+    }
+    bits(p)
+}
+
 fn refined_vertex(
     data: &[Q],
     c: &[[u32; 4]; 16],
@@ -214,13 +247,14 @@ fn refined_vertex(
 }
 
 impl Mesh {
-    fn build(
+    fn choose(
         calls: &[GpuCall],
         c: &[[u32; 4]; 16],
         eyes: &[EyeProject; 2],
+        threshold: f32,
         remaining: &mut usize,
         stats: &mut Stats,
-    ) -> Option<(Self, Vec<Q>)> {
+    ) -> Option<Choice> {
         let source = calls.first()?;
         let nv = source.uniforms[7][2] as usize;
         if source.program != ssx3_render::gpu::Program::Bezier
@@ -240,7 +274,6 @@ impl Mesh {
         stats.visible_sources += 1;
         let valid: Vec<_> = (0..nv).map(|v| valid_vertex(&source.data, c, v)).collect();
         let mut selected = Vec::new();
-        let mut endings = HashMap::new();
         let mut seen = HashSet::new();
         let mut patch_triangles = 0;
         for call in calls
@@ -274,8 +307,16 @@ impl Mesh {
                     0.0
                 };
                 stats.max_error = stats.max_error.max(error);
-                if error < 0.7 || *remaining == 0 || patch_triangles >= 32 {
-                    endings.insert(i, vec![i]);
+                for (bin, threshold) in stats
+                    .error_bins
+                    .iter_mut()
+                    .zip([1.0, 2.0, 5.0, 10.0, 20.0, 40.0])
+                {
+                    if error >= threshold {
+                        *bin += 1;
+                    }
+                }
+                if error < threshold || *remaining == 0 || patch_triangles >= 32 {
                     continue;
                 }
                 *remaining -= 1;
@@ -303,8 +344,26 @@ impl Mesh {
             .into_iter()
             .filter_map(|(key, n)| (n == 2).then_some(key))
             .collect();
+        stats.patches += 1;
+        Some(Choice {
+            source_vertices: nv,
+            selected,
+            curved,
+        })
+    }
+
+    fn build(
+        calls: &[GpuCall],
+        c: &[[u32; 4]; 16],
+        eyes: &[EyeProject; 2],
+        remaining: &mut usize,
+        stats: &mut Stats,
+    ) -> Option<(Self, Vec<Q>)> {
+        let choice = Self::choose(calls, c, eyes, 0.7, remaining, stats)?;
+        let source = calls.first()?;
         let mut data = source.data.clone();
         let mut appended = Vec::new();
+        let mut endings = HashMap::new();
         let a = [1.0, 0.0, 0.0];
         let b = [0.0, 1.0, 0.0];
         let cc = [0.0, 0.0, 1.0];
@@ -312,7 +371,7 @@ impl Mesh {
         let bc = [0.0, 0.5, 0.5];
         let ca = [0.5, 0.0, 0.5];
         let triangles = [[a, ab, ca], [ab, b, bc], [ca, bc, cc], [ab, bc, ca]];
-        for (i, verts) in selected {
+        for (i, verts) in choice.selected {
             let mut ids = Vec::with_capacity(4);
             for tri in triangles {
                 for weights in tri {
@@ -320,17 +379,16 @@ impl Mesh {
                         vertices: verts,
                         weights,
                     };
-                    data.extend_from_slice(&refined_vertex(&source.data, c, blend, &curved));
+                    data.extend_from_slice(&refined_vertex(&source.data, c, blend, &choice.curved));
                     appended.push(blend);
                 }
                 ids.push((data.len() / 3 - 1) as u32);
             }
             endings.insert(i, ids);
         }
-        stats.patches += 1;
         Some((
             Self {
-                source_vertices: nv,
+                source_vertices: choice.source_vertices,
                 endings,
                 appended,
             },
@@ -418,6 +476,155 @@ pub fn refine_calls(
     }
 }
 
+impl GpuMesh {
+    fn build(
+        calls: &[GpuCall],
+        coeffs: &[[u32; 4]; 16],
+        eyes: &[EyeProject; 2],
+        threshold: f32,
+        remaining: &mut usize,
+        stats: &mut Stats,
+    ) -> Option<(Self, Vec<Q>)> {
+        let choice = Mesh::choose(calls, coeffs, eyes, threshold, remaining, stats)?;
+        let data = &calls.first()?.data;
+        let mut selected = HashMap::with_capacity(choice.selected.len());
+        let mut midpoints = Vec::with_capacity(3 * choice.selected.len());
+        for (i, [a, b, c]) in choice.selected {
+            let id = (midpoints.len() / 3 + 1) as u32;
+            for (x, y) in [(a, b), (b, c), (c, a)] {
+                midpoints.push(midpoint_position(data, coeffs, x, y, &choice.curved));
+            }
+            selected.insert(i, id);
+        }
+        Some((
+            Self {
+                source_vertices: choice.source_vertices,
+                selected,
+            },
+            midpoints,
+        ))
+    }
+
+    fn split(&self, call: &mut GpuCall) -> Option<GpuCall> {
+        if call.uniforms[7][0] != bz::STRIPS
+            || (call.uniforms[7][1] != 0 && call.data.len() != self.source_vertices)
+        {
+            return None;
+        }
+        let mut coarse = Vec::with_capacity(call.indices.len());
+        let mut refined_indices = Vec::new();
+        for &i in &call.indices {
+            if let Some(&id) = self.selected.get(&i) {
+                for sub in 0..12 {
+                    refined_indices.push((id << 16) | (i << 4) | sub);
+                }
+            } else {
+                coarse.push(i);
+            }
+        }
+        if refined_indices.is_empty() {
+            return None;
+        }
+        if coarse.is_empty() && matches!(call.link, Link::Source(bz::KEY)) {
+            // GS uploads Source data only for a nonempty draw. Leave its
+            // first triangle on the original path so the following Reuse
+            // draw can read both vertices and compact midpoint records.
+            coarse.push(call.indices[0]);
+            refined_indices.drain(..12);
+            if refined_indices.is_empty() {
+                return None;
+            }
+        }
+        let mut refined = call.clone();
+        refined.pre.clear();
+        refined.link = Link::Reuse(bz::KEY);
+        if call.uniforms[7][1] == 0 {
+            refined.data.clear();
+        }
+        refined.indices = refined_indices;
+        refined.index_mode = 0;
+        refined.uniforms[7][0] = 3; // `bezier_vertex`'s VR subdivision mode.
+        call.indices = coarse;
+        Some(refined)
+    }
+}
+
+fn gpu_group(
+    mut group: Vec<GpuCall>,
+    coeffs: Option<&[[u32; 4]; 16]>,
+    eyes: Option<&[EyeProject; 2]>,
+    threshold: f32,
+    cache: &mut Option<GpuMesh>,
+    remaining: &mut usize,
+    stats: &mut Stats,
+) -> Vec<GpuCall> {
+    if group.is_empty() {
+        return group;
+    }
+    if matches!(group[0].link, Link::Source(bz::KEY)) {
+        let built = coeffs
+            .zip(eyes)
+            .and_then(|(c, eyes)| GpuMesh::build(&group, c, eyes, threshold, remaining, stats));
+        if let Some((mesh, midpoints)) = built {
+            group[0].data.extend_from_slice(&midpoints);
+            *cache = Some(mesh);
+        } else {
+            *cache = None;
+        }
+    }
+    let Some(mesh) = cache.as_ref() else {
+        return group;
+    };
+    let mut out = Vec::with_capacity(group.len() * 2);
+    for mut call in group {
+        let refined = if matches!(call.link, Link::Source(bz::KEY) | Link::Reuse(bz::KEY))
+            && call.program == ssx3_render::gpu::Program::Bezier
+        {
+            mesh.split(&mut call)
+        } else {
+            None
+        };
+        out.push(call);
+        if let Some(refined) = refined {
+            out.push(refined);
+        }
+    }
+    out
+}
+
+/// Append only the chosen midpoint positions and encode the subtriangles.
+/// The shader reconstructs their UVs and normals for each eye and pass.
+pub fn refine_calls_gpu(
+    calls: &mut Vec<GpuCall>,
+    coeffs: Option<&[[u32; 4]; 16]>,
+    eyes: Option<&[EyeProject; 2]>,
+    threshold: f32,
+    cache: &mut Option<GpuMesh>,
+    remaining: &mut usize,
+    stats: &mut Stats,
+) {
+    let mut result = Vec::with_capacity(calls.len());
+    let mut group = Vec::new();
+    for call in std::mem::take(calls) {
+        if matches!(call.link, Link::Source(_)) && !group.is_empty() {
+            result.extend(gpu_group(
+                std::mem::take(&mut group),
+                coeffs,
+                eyes,
+                threshold,
+                cache,
+                remaining,
+                stats,
+            ));
+        }
+        group.push(call);
+    }
+    result.extend(gpu_group(
+        group, coeffs, eyes, threshold, cache, remaining, stats,
+    ));
+    *calls = result;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +704,39 @@ mod tests {
         assert_eq!(call.indices, [5]);
         assert_eq!(call.data.len(), 6);
         assert_eq!(f(call.data[3])[0], 0.5);
+    }
+
+    #[test]
+    fn compact_gpu_call_keeps_coarse_triangles_and_source_data() {
+        let mesh = GpuMesh {
+            source_vertices: 6,
+            selected: HashMap::from([(2, 1)]),
+        };
+        let mut uniforms = [[0; 4]; 32];
+        uniforms[7] = [bz::STRIPS, 0, 6, 0];
+        let mut call = GpuCall {
+            program: Program::Bezier,
+            pre: vec![7],
+            tag: 0,
+            uniforms,
+            data: vec![[0; 4]; 21], // six original vertices, three midpoints
+            indices: vec![2, 5],
+            index_mode: tri_mode(3, 2),
+            alpha_max: 0.0,
+            link: Link::Source(bz::KEY),
+            split: None,
+            mesh_key: None,
+        };
+        let refined = mesh.split(&mut call).unwrap();
+        assert_eq!(call.indices, [5]);
+        assert_eq!(call.data.len(), 21);
+        assert_eq!(call.uniforms[7][0], bz::STRIPS);
+        assert_eq!(refined.link, Link::Reuse(bz::KEY));
+        assert!(refined.pre.is_empty());
+        assert!(refined.data.is_empty());
+        assert_eq!(refined.uniforms[7][0], 3);
+        assert_eq!(refined.indices.len(), 12);
+        assert_eq!(refined.indices[0], (1 << 16) | (2 << 4));
+        assert_eq!(refined.indices[11], (1 << 16) | (2 << 4) | 11);
     }
 }

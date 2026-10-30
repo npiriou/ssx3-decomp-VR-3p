@@ -62,8 +62,9 @@ its GPU work. It excludes OpenXR swapchain and headset compositor time.
 | `SSX3_VR_INSPECT_DRAW=<index>` | With `gfx_replay`, log a frame draw's material, texture IDs and VU/DIRECT calls; use with `SSX3_GFX_PROBE=x,y` to trace a pixel back to its draw and GPU call. |
 | `SSX3_VR_TERRAIN_SOURCE=0` | Skip VR-only copying of the original Bézier coefficients and per-vertex patch coordinates into published frames (enabled by the VR executable). The default image is unchanged either way. |
 | `SSX3_VR_TERRAIN_VALIDATE=1` | With `gfx_replay` and `SSX3_VR_TERRAIN_SOURCE=1`, count terrain calls whose VU grid corner exactly matches the recorded patch coefficients. |
-| `SSX3_VR_TERRAIN_MESH=1` | Experimental VR-only Bézier triangle refinement from the original surface, selected by per-eye projected error. Off by default while image quality and frame cost are being tuned. Requires `SSX3_VR_TERRAIN_SOURCE=1`. |
+| `SSX3_VR_TERRAIN_MESH=cpu\|gpu` | Experimental VR-only Bézier triangle refinement from the original surface, selected by per-eye projected error. `1` aliases `cpu`; `gpu` uploads only selected midpoint positions and assembles the subtriangles in the shader. Off by default while image quality and frame cost are being tuned. Requires `SSX3_VR_TERRAIN_SOURCE=1`. |
 | `SSX3_VR_TERRAIN_BUDGET=256` | Maximum refined source triangles per frame for the experimental mesh, capped at 1200. |
+| `SSX3_VR_TERRAIN_ERROR=10` | Minimum projected error in nominal eye pixels for the experimental `gpu` mode; the `cpu` mode keeps its 0.7-pixel threshold. |
 | `SSX3_VR_TERRAIN_STATS=1` | Log the experimental mesh's visible sources, selected triangles, projection errors and remaining budget. |
 
 The current VR path is under redesign; `docs/plans/vr-redesign.md` tracks the remaining coverage and frame-rate gates. Mute game tests with `SSX3_AUDIO=0`.

@@ -257,9 +257,24 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   fresh images/s in the adjacent default-path run. With refinement disabled,
   the new per-vertex patch metadata produced byte-identical 512-square left
   and right images against the source-capture-off control. This CPU path
-  therefore remains disabled by default. The next work is to target the
-  highest-error close surfaces and move refinement off the frame's CPU path
-  before repeating the headset gate.
+  therefore remains disabled by default. The compact GPU assembly trial below
+  targets the highest-error close surfaces before repeating the headset gate.
+- A second opt-in mesh path (`SSX3_VR_TERRAIN_MESH=gpu`) now retains the
+  native coarse draws and sends only selected cubic midpoint positions to
+  the shader, which assembles the refined geometry, texture coordinates and
+  normals for each eye and texture pass. At a 0.7-pixel threshold, a frozen
+  512-square Gravitude side view matched the CPU mesh pixel-for-pixel in the
+  left eye; both eyes were filled and distinct. Measuring the error distribution
+  then motivated a 10-pixel default threshold for this experimental mode:
+  roughly 115 side-view or 129 forward-view triangles meet it at frame 1000.
+  A muted 1920-square live race through frame 651 still measured only 56.3
+  game ticks/s and 56.0 fresh stereo images/s over frames 420–651. The
+  renderer recorded 7.7 colour snapshots and copies covering 770% of an eye
+  frame per draw. An adjacent run with the mesh off measured 59.9 game ticks/s
+  and 59.9 fresh stereo images/s, with 7.2 colour snapshots and 715% copied.
+  This path stays off by default; reducing the repeated eye
+  rendering and snapshot cost is the next performance investigation. These
+  measurements are offline, with no new headset validation.
 - **G3 is still open.** A repeated frozen 1920-square stereo frame with UI
   took about 20 ms with the original bloom. Disabling that bloom reduced it
   to 13.89 ms; moving the UI pass to a separate 1024-square target reduced it
