@@ -24,6 +24,7 @@ pub mod debug;
 mod depth_query;
 mod draw;
 pub mod gs;
+mod mesh_vr;
 mod options;
 pub mod pack;
 mod post;
@@ -108,6 +109,7 @@ pub struct Inner {
     rts: HashMap<u32, RtTarget>,
     gs: gs::Gs,
     terrain_geometry: terrain_vr::GeometryCache,
+    mesh_geometry: mesh_vr::Cache,
     vu: Box<[u8; 16384]>,
     texcache: HashMap<tex::TexKey, CachedTex>,
     /// The terrain bake's textures blurred (real-time lighting, flag 32768).
@@ -331,6 +333,7 @@ impl Renderer {
                 rts: HashMap::new(),
                 gs: gs::Gs::new(),
                 terrain_geometry: Default::default(),
+                mesh_geometry: Default::default(),
                 vu: Box::new([0; 16384]),
                 texcache: HashMap::new(),
                 bake_blur,
@@ -1246,6 +1249,7 @@ impl Inner {
         Build {
             gs: std::mem::take(&mut self.gs),
             terrain_geometry: std::mem::take(&mut self.terrain_geometry),
+            mesh_geometry: std::mem::take(&mut self.mesh_geometry),
             vu: std::mem::replace(&mut self.vu, Box::new([0; 16384])),
             stats: self.stats,
             phase1_end: self.phase1_end,
@@ -1259,6 +1263,7 @@ impl Inner {
     fn put_build(&mut self, b: Build) {
         self.gs = b.gs;
         self.terrain_geometry = b.terrain_geometry;
+        self.mesh_geometry = b.mesh_geometry;
         self.vu = b.vu;
         self.stats = b.stats;
         self.phase1_end = b.phase1_end;
@@ -3417,6 +3422,7 @@ impl VuReceiver {
 struct Build {
     gs: gs::Gs,
     terrain_geometry: terrain_vr::GeometryCache,
+    mesh_geometry: mesh_vr::Cache,
     vu: Box<[u8; 16384]>,
     stats: Stats,
     phase1_end: usize,
@@ -3628,6 +3634,18 @@ impl Build {
         let inspect_mesh = std::env::var("SSX3_VR_INSPECT_MESH")
             .ok()
             .and_then(|value| value.parse::<usize>().ok());
+        let inspect_mesh_vertices = std::env::var_os("SSX3_VR_INSPECT_MESH_VERTICES").is_some();
+        let mut inspect_mesh_serial = 0usize;
+        let rock_strength = if vr_active {
+            std::env::var("SSX3_VR_ROCK_SMOOTH")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|&v| v.is_finite() && (0.0..=1.0).contains(&v))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        b.mesh_geometry.begin_frame(rock_strength);
         let refine_terrain = matches!(terrain_mode.as_str(), "1" | "cpu" | "gpu");
         let terrain_reprojections: Vec<Option<[[[f32; 4]; 4]; 2]>> = if refine_terrain {
             built
@@ -3664,6 +3682,7 @@ impl Build {
             .unwrap_or(10.0);
         let terrain_geometry_cache =
             std::env::var("SSX3_VR_TERRAIN_GEOMETRY_CACHE").as_deref() != Ok("0");
+        let mut rock_hits = 0usize;
         std::thread::scope(|sc| {
             // The helper workers (the browser) take every chunk up front;
             // without threads, this thread does.
@@ -3792,7 +3811,22 @@ impl Build {
                                         );
                                     }
                                 }
-                                for c in g {
+                                let rock_draw = (rock_strength > 0.0)
+                                    .then_some(n)
+                                    .flatten()
+                                    .filter(|&index| {
+                                        matches!(owner, Owner::Payload(_))
+                                            && draws.get(index).is_some_and(|draw| {
+                                                draw.state.material == Material::General
+                                                    && draw.state.layer == 4
+                                                    && matches!(draw.tex[0], Some(739 | 664))
+                                            })
+                                    });
+                                for mut c in g {
+                                    if let Some(index) = rock_draw {
+                                        rock_hits +=
+                                            usize::from(b.mesh_geometry.transform(index, &mut c));
+                                    }
                                     if n == inspect_mesh
                                         && c.program == ssx3_render::gpu::Program::Mat3Mesh
                                         && c.uniforms[4][2] == 1
@@ -3821,17 +3855,48 @@ impl Build {
                                                 },
                                             )
                                         });
+                                        let screen_id = c.uniforms[..4].iter().flatten().fold(
+                                            0xcbf2_9ce4_8422_2325u64,
+                                            |hash, bits| {
+                                                (hash ^ *bits as u64).wrapping_mul(0x100_0000_01b3)
+                                            },
+                                        );
                                         eprintln!(
-                                            "[vr-mesh] draw {} call {:?}: {} vertices, {} indices, bounds {:?}, uv {:?}, lit {}, first {:?}",
+                                            "[vr-mesh] draw {} call {} entry {:?}: {} vertices, {} indices, screen {screen_id:016x}, link {:?}, mesh_key {:?}, bounds {:?}, uv {:?}, lit {}, first {:?}",
                                             n.unwrap_or_default(),
+                                            inspect_mesh_serial,
                                             vu_call.entry,
                                             positions.len(),
                                             c.draw_len(),
+                                            c.link,
+                                            c.mesh_key,
                                             bounds,
                                             uv_bounds,
                                             c.uniforms[4][0],
                                             &positions[..positions.len().min(4)]
                                         );
+                                        if inspect_mesh_vertices {
+                                            for (vertex_index, vertex) in
+                                                c.data.chunks_exact(4).enumerate()
+                                            {
+                                                let p = vertex[0]
+                                                    .map(|bits| bits as i32 as f32 / 32768.0);
+                                                let uv = vertex[1]
+                                                    .map(|bits| bits as i32 as f32 / 4096.0);
+                                                eprintln!(
+                                                    "[vr-mesh-v] {} {} {:?} {:?}",
+                                                    inspect_mesh_serial,
+                                                    vertex_index,
+                                                    &p[..3],
+                                                    &uv[..2]
+                                                );
+                                            }
+                                            eprintln!(
+                                                "[vr-mesh-i] {} {:?}",
+                                                inspect_mesh_serial, c.indices
+                                            );
+                                        }
+                                        inspect_mesh_serial += 1;
                                     }
                                     if vr_sky_dome && matches!(owner, Owner::Payload(0)) {
                                         sky_dome_calls.push(c.clone());
@@ -4036,6 +4101,20 @@ impl Build {
             }
             vu.finish(&plan, &mut b.vu);
         });
+        if rock_strength > 0.0 {
+            let prepared = b.mesh_geometry.finish_frame();
+            if std::env::var_os("SSX3_VR_ROCK_STATS").is_some() {
+                eprintln!(
+                    "[vr-rock] frame {} reused {} calls, prepared {} groups ({} source vertices, {} -> {} triangles)",
+                    b.frame,
+                    rock_hits,
+                    prepared.len(),
+                    prepared.iter().map(|s| s.source_vertices).sum::<usize>(),
+                    prepared.iter().map(|s| s.source_triangles).sum::<usize>(),
+                    prepared.iter().map(|s| s.triangles).sum::<usize>()
+                );
+            }
+        }
         if refine_terrain && std::env::var_os("SSX3_VR_TERRAIN_STATS").is_some() {
             eprintln!("[vr-terrain-mesh:{terrain_mode}] {} patches, {} refined triangles, {} visible sources, {} rejected sources, {} candidates, {} measured, {:.2} max error, {} triangle budget remaining, {} projected matrices",
                 terrain_stats.patches, terrain_stats.triangles, terrain_stats.visible_sources,

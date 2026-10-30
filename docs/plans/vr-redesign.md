@@ -513,6 +513,26 @@ measured 59.6 fresh stereo images/s over frames 420–651, with both eyes filled
 and distinct. This improves one material but does not close G1 or prove the
 SteamVR frame-rate gate.
 
+The native frame-650 mesh topology explains the hard edge more precisely.
+Draw 198 repeats six small closed rock meshes in two screen-matrix groups;
+the visible final cliff is draw 200, whose 24 source calls form mostly open
+patches. Shared positions must be welded across calls before changing them.
+An opt-in VR renderer trial (`SSX3_VR_ROCK_SMOOTH=0.7`) now applies one blended
+Loop subdivision step to the multi-call groups, retaining open boundary
+vertices and reusing refined source meshes when the camera matrix changes.
+On a frozen 1920-square side stereo replay, it changed 526,757 left-eye and
+523,179 right-eye pixels, rounded the cliff outline, and kept both eyes
+filled. Twenty repeats measured 18.23 ms per rendered stereo frame without
+the trial and 18.31 ms with it; this small difference is not a reliable
+performance claim. Single-call refinement affected only about 1,100 pixels
+per eye in the same view and was omitted. A muted live 650-tick run reused
+28 source calls by frame 600 without preparing new groups; race frames
+420–650 measured 55.9 fresh stereo images/s, but an adjacent control run
+hit a long refresh and measured 44.8/s, so these runs do not establish the
+trial's live cost. The large rock UVs remain visibly stretched, and source
+geometry is still coarse. This remains off by default; G1, G3 and headset
+review remain open.
+
 ### Gravitude upper-sky joins (2026-10-31)
 
 The upper panorama consists of four 45-degree strips, three contiguous over
