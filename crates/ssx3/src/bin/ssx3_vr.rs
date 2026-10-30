@@ -526,20 +526,29 @@ fn run() -> Result<(), Box<dyn Error>> {
         if game_worker.thread.as_ref().is_some_and(|t| t.is_finished()) {
             return Err("VR game worker stopped unexpectedly".into());
         }
-        // When no newer tick image is ready, redraw the retained native
-        // scene from the predicted headset pose. A game tick can complete
-        // while this runs; the renderer lock selects one complete scene.
+        // Redraw the retained scene between ticks when possible. A large
+        // head turn waits for the current render so the old gaze is not
+        // presented as a new view; ordinary motion stays nonblocking.
+        let image_serial = gfx.present_serial();
+        let image_eyes = gfx.present_vr_eyes();
+        let large_jump = current_eyes
+            .zip(image_eyes)
+            .is_some_and(|(now, drawn)| vr_camera::large_pose_jump(now, drawn));
         if frame.should_render
             && !no_submit
-            && gfx.present_serial() == last_present_serial
             && current_eyes.is_some_and(|eyes| {
-                gfx.present_vr_eyes()
-                    .is_none_or(|drawn| vr_camera::eyes_moved(eyes, drawn, units_per_metre))
+                image_eyes.is_none_or(|drawn| vr_camera::eyes_moved(eyes, drawn, units_per_metre))
+                    && (image_serial == last_present_serial || large_jump)
             })
         {
             let refresh_start = Instant::now();
-            let _drawn = current_eyes
-                .is_some_and(|eyes| gfx.refresh_vr_eyes_if_stale(eyes, last_present_serial));
+            let _drawn = current_eyes.is_some_and(|eyes| {
+                if large_jump {
+                    gfx.refresh_vr_eyes_after_jump(eyes)
+                } else {
+                    gfx.refresh_vr_eyes_if_stale(eyes, image_serial)
+                }
+            });
             stages.elapsed(9, refresh_start);
         }
         let lock_start = Instant::now();
@@ -743,13 +752,18 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         std::thread::sleep(next.saturating_duration_since(now));
         next += period;
         pending_max = pending_max.max(gfx.pending_frames());
-        if gfx.present_serial() == last_serial
-            && gfx
-                .present_vr_eyes()
-                .is_none_or(|drawn| vr_camera::eyes_moved(eyes, drawn, units_per_metre))
+        let image_serial = gfx.present_serial();
+        let image_eyes = gfx.present_vr_eyes();
+        let large_jump = image_eyes.is_some_and(|drawn| vr_camera::large_pose_jump(eyes, drawn));
+        if image_eyes.is_none_or(|drawn| vr_camera::eyes_moved(eyes, drawn, units_per_metre))
+            && (image_serial == last_serial || large_jump)
         {
             let t = Instant::now();
-            refreshes += u64::from(gfx.refresh_vr_eyes_if_stale(eyes, last_serial));
+            refreshes += u64::from(if large_jump {
+                gfx.refresh_vr_eyes_after_jump(eyes)
+            } else {
+                gfx.refresh_vr_eyes_if_stale(eyes, image_serial)
+            });
             refresh_ms += t.elapsed().as_secs_f64() * 1000.0;
         }
         let lock_start = Instant::now();

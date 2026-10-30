@@ -561,6 +561,23 @@ impl Renderer {
         true
     }
 
+    /// After a large head turn, wait for any in-flight scene render and
+    /// redraw its tracked eyes before presenting it. Such jumps are rare;
+    /// the nonblocking path above handles ordinary motion between ticks.
+    pub fn refresh_vr_eyes_after_jump(&self, eyes: [vr::Eye; 2]) -> bool {
+        let mut g = self.0.lock().unwrap();
+        let _queue = self.1.queue_access.lock().unwrap();
+        if !g.refresh_vr_eyes(eyes) {
+            return false;
+        }
+        *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
+        *self.1.present_eyes.lock().unwrap() = g.rendered_eyes;
+        self.1
+            .present_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        true
+    }
+
     /// The modern graphics options.
     pub fn set_options(&self, o: Options) {
         let mut g = self.0.lock().unwrap();

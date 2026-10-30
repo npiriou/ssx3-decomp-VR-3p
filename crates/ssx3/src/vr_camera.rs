@@ -119,6 +119,15 @@ pub fn rotation_delta_deg(now: Eye, drawn: Eye) -> f32 {
     ((trace - 1.0) * 0.5).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
+/// An image prepared for the previous gaze cannot be safely reused after a
+/// large head turn: its newly exposed side may not have been rendered. Small
+/// pose changes can be handled by the OpenXR compositor until the next tick.
+pub fn large_pose_jump(now: [Eye; 2], drawn: [Eye; 2]) -> bool {
+    now.into_iter()
+        .zip(drawn)
+        .any(|(now, drawn)| rotation_delta_deg(now, drawn) > 15.0)
+}
+
 impl Anchor {
     pub fn new(views: &[xr::View]) -> Option<Self> {
         if views.len() != 2 {
@@ -251,6 +260,12 @@ mod tests {
         turned.view_from_game[2] = [-1.0, 0.0, 0.0, 0.0];
         assert!(rotation_delta_deg(eye, eye) < 0.01);
         assert!((rotation_delta_deg(eye, turned) - 90.0).abs() < 0.01);
+        assert!(large_pose_jump([eye; 2], [turned; 2]));
+        let mut small = eye;
+        let (sin, cos) = 10.0_f32.to_radians().sin_cos();
+        small.view_from_game[0] = [cos, 0.0, sin, 0.0];
+        small.view_from_game[2] = [-sin, 0.0, cos, 0.0];
+        assert!(!large_pose_jump([eye; 2], [small; 2]));
     }
 
     #[test]

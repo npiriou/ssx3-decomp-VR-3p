@@ -54,6 +54,16 @@ Status: implementation in progress, 2026-10-30. This supersedes the implementati
   fresh stereo images/s; the gap between requested and drawn head rotation
   was 0.50° at p95 and 0.69° maximum. A faster 90° turn at 180°/s reached
   3.82° maximum. SteamVR's actual reprojection remains unmeasured.
+  A large-pose-jump path now waits for the current scene render only when
+  the requested head direction differs by more than 15° from the image.
+  In the 1920-square Gravitude offline pipeline, an instantaneous 90° turn
+  previously presented one image with a 90° pose gap; the new path refreshed
+  that scene once and measured a 0° maximum gap. That exceptional refresh
+  took 34.3 ms, while race frames 420–651 measured 59.8 game ticks/s and
+  59.3 fresh stereo images/s. During a 180°/s continuous sweep, no blocking
+  refresh was needed; race frames 420–650 measured 59.7 ticks/s and 60.0
+  fresh stereo images/s, with 2.91° p95 and 8.47° maximum pose gap. This
+  improves sudden turns but does not establish headset comfort or pacing.
 - Nash retains a headset-directed 75° cone of loaded patches and instances,
   plus nearby objects in every direction, before the game's destructive
   forward cull. Headless ARA1 captures at frames 500, 1000, 1500 confirm
