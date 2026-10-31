@@ -852,6 +852,32 @@ Gravitude's late-course snow, still need work. All 35 `ssx3-gfx` tests pass,
 and a desktop frame replay is byte-identical before and after this asset.
 Headset quality is unverified.
 
+### Gravitude close snow textures (2026-10-31)
+
+At tick 3600 with a simulated +90° head turn, a live pixel probe traced the
+large pale foreground to terrain Bézier draw 259 and texture
+`b7f35a839d79cad2` (128×128). Its source has two curved tracks but almost
+no fine snow grain. The small mound behind it uses `7f091fe95f2b43ba`,
+another 128×128 image with a gray crystalline patch. The same native baked
+lighting texture is applied on a second pass to both areas. Global
+`SSX3_LOD_BIAS=-2` sharpened the hill only slightly and did not fix the
+foreground blur.
+
+Two 1254-square reconstructions preserve the original track and crystalline
+patterns while adding close-range detail. Separate replacements confirmed
+which region each image affects. A combined muted run through tick 3600 at
+1920 square per eye shows grain in the near snow and a more detailed mound,
+with filled and distinct eyes. Over race frames 420–3601 it delivered 59.8
+fresh stereo images/s on average; fresh-image intervals were 15.96 ms median,
+22.72 ms at p95 and 32.71 ms maximum. These are offline measurements and do
+not include SteamVR compositor cost. The 14 preloaded VR textures use 57.3
+MiB decoded, below the 64 MiB budget. The two new images are VR-only builtins;
+desktop keeps the original 128×128 textures. Some stretched UV bands and
+late-frame pacing spikes remain visible. All 36 `ssx3-gfx` tests pass; the
+bundled path reproduces the combined trial's world-eye PNG exactly, and a
+desktop frame replay remains byte-identical to the pre-change image. Headset
+quality is unverified.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

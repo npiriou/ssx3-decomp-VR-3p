@@ -145,9 +145,9 @@ textures seamless and upscales alpha separately. For non-repeating sky panels,
 Replaced textures get mipmaps and anisotropic filtering.
 
 The VR executable enables `SSX3_VR_TEXTURES=1` by default. This bundles a traced,
-high-resolution replacement for Gravitude's close overhead chevrons and a
-detailed rock albedo derived from the game's 128×128 cliff texture, plus a
-Snow Jam ice/snow terrain texture reconstructed from its 128×128 source;
+high-resolution replacement for Gravitude's close overhead chevrons, rock,
+crusted snow and tracked snow, plus a Snow Jam ice/snow terrain texture, all
+reconstructed from the corresponding game textures;
 `0` disables the bundled images. When `textures/vr-replace` exists, VR uses
 that local pack automatically;
 the desktop game keeps `textures/replace`. A file with the same texture name
