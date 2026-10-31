@@ -873,10 +873,36 @@ fresh stereo images/s on average; fresh-image intervals were 15.96 ms median,
 not include SteamVR compositor cost. The 14 preloaded VR textures use 57.3
 MiB decoded, below the 64 MiB budget. The two new images are VR-only builtins;
 desktop keeps the original 128×128 textures. Some stretched UV bands and
-late-frame pacing spikes remain visible. All 36 `ssx3-gfx` tests pass; the
+unresolved OpenXR pacing remain. All 36 `ssx3-gfx` tests pass; the
 bundled path reproduces the combined trial's world-eye PNG exactly, and a
 desktop frame replay remains byte-identical to the pre-change image. Headset
 quality is unverified.
+
+### Interpreting the 60 Hz game on a 72 Hz headset (2026-10-31)
+
+The earlier fresh-image p95 was too broad a pacing diagnosis. At 60 game
+images/s and 72 headset refreshes/s, an ideal display must reuse 12 game
+images each second. One in six intervals between *new* images consequently
+spans two 72 Hz refreshes (27.78 ms), even if no display deadline is missed.
+The offline interval timer samples CPU blit completion, not headset scanout;
+its 22.7 ms p95 cannot by itself establish a SteamVR drop or a late game
+frame. The correct target is near 60 new stereo images/s plus 72 timely
+headset submissions/s, with scanout/compositor and queue waits measured.
+
+The offline pipeline now reports p50/p95/max separately for its 72 Hz
+submission interval, timer slip/wake lateness, renderer queue lock and blit
+GPU wait. A muted 3600-tick Gravitude run at 1920 square per eye measured
+59.8 new stereo images/s and 72.0 submissions/s over race frames 420–3600.
+The submission interval p95 was 17.93 ms, timer wake lateness p95 0.96 ms,
+queue-lock wait p95 5.57 ms and blit GPU wait p95 2.78 ms. There was one
+12.73 ms scheduler slip; the maximum submission interval was 32.81 ms.
+The queue lock is a measurable source of CPU completion jitter, but these
+offline numbers do not include `xrWaitFrame`, swapchain acquire/release or
+`xrEndFrame`. The lock currently covers the renderer's two eye draws and
+HUD, and the OpenXR blit through frame submission. Its present textures are
+reused each frame, so narrowing the lock without separate published image
+storage could mix two game frames in a headset image. Keep the existing
+ownership guard until a safe buffered handoff is implemented and measured.
 
 ## Product contract
 

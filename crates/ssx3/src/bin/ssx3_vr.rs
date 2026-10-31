@@ -754,6 +754,12 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     let mut fresh_intervals_ms = Vec::new();
     let mut present_ages_ms = Vec::new();
     let mut last_fresh_at: Option<Instant> = None;
+    let mut submit_intervals_ms = Vec::new();
+    let mut last_submit_at: Option<Instant> = None;
+    let mut schedule_slips_ms = Vec::new();
+    let mut wake_lateness_ms = Vec::new();
+    let mut lock_waits_ms = Vec::new();
+    let mut blit_gpu_waits_ms = Vec::new();
     let turn_at = std::env::var("SSX3_VR_OFFLINE_TURN_AT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
@@ -796,9 +802,15 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         }
         let now = Instant::now();
         if next < now {
+            if game_frame >= 420 {
+                schedule_slips_ms.push(now.duration_since(next).as_secs_f64() * 1000.0);
+            }
             next = now;
         }
         std::thread::sleep(next.saturating_duration_since(now));
+        if game_frame >= 420 {
+            wake_lateness_ms.push(Instant::now().duration_since(next).as_secs_f64() * 1000.0);
+        }
         next += period;
         pending_max = pending_max.max(gfx.pending_frames());
         let visibility_jump = gfx
@@ -836,7 +848,11 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         }
         let lock_start = Instant::now();
         gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
-            lock_ms += lock_start.elapsed().as_secs_f64() * 1000.0;
+            let wait_ms = lock_start.elapsed().as_secs_f64() * 1000.0;
+            lock_ms += wait_ms;
+            if game_frame >= 420 {
+                lock_waits_ms.push(wait_ms);
+            }
             let serial = gfx.present_serial();
             let stereo = gfx.present_stereo_views();
             let hud = gfx.present_vr_ui_view();
@@ -850,7 +866,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                         present_ages_ms.push(age);
                     }
                 }
-                gpu_wait_ms += compositor.blit_stereo(
+                let wait_ms = compositor.blit_stereo(
                     &gpu.device,
                     &gpu.queue,
                     stereo.as_ref().map(|s| [&s[0].0, &s[1].0]),
@@ -858,7 +874,16 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                     panel_eyes(rendered_eyes.unwrap_or(eyes)),
                     panel,
                 )?;
+                gpu_wait_ms += wait_ms;
                 submitted += 1;
+                if game_frame >= 420 {
+                    blit_gpu_waits_ms.push(wait_ms);
+                    let now = Instant::now();
+                    if let Some(previous) = last_submit_at.replace(now) {
+                        submit_intervals_ms
+                            .push(now.duration_since(previous).as_secs_f64() * 1000.0);
+                    }
+                }
                 let is_fresh = stereo.is_some() && serial != last_serial;
                 fresh += u64::from(is_fresh);
                 if game_frame >= 420 && is_fresh {
@@ -959,6 +984,17 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             fresh_intervals_ms.len(),
             present_ages_ms.len(),
         );
+    }
+    for (name, values) in [
+        ("submit interval", &mut submit_intervals_ms),
+        ("schedule slip", &mut schedule_slips_ms),
+        ("wake lateness", &mut wake_lateness_ms),
+        ("queue lock", &mut lock_waits_ms),
+        ("blit GPU wait", &mut blit_gpu_waits_ms),
+    ] {
+        if let Some((p50, p95, max)) = quantiles(values) {
+            println!("offline race stage: {name} p50 {p50:.2}ms p95 {p95:.2}ms max {max:.2}ms ({} samples)", values.len());
+        }
     }
     if !pose_errors.is_empty() {
         pose_errors.sort_by(f32::total_cmp);
