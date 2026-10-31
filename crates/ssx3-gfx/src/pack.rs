@@ -46,9 +46,11 @@ pub struct Pack {
 const VR_GRAVITUDE_CHEVRONS: &[u8] =
     include_bytes!("../../../assets/vr-textures/d5c495a1196f376d.png");
 const VR_GRAVITUDE_ROCK: &[u8] = include_bytes!("../../../assets/vr-textures/b971a7abaf011a26.png");
-const VR_BUILTINS: [(&str, &[u8]); 2] = [
+const VR_SNOW_JAM_ICE: &[u8] = include_bytes!("../../../assets/vr-textures/b5f233a48a7355bb.png");
+const VR_BUILTINS: [(&str, &[u8]); 3] = [
     ("d5c495a1196f376d", VR_GRAVITUDE_CHEVRONS),
     ("b971a7abaf011a26", VR_GRAVITUDE_ROCK),
+    ("b5f233a48a7355bb", VR_SNOW_JAM_ICE),
 ];
 
 impl Pack {
@@ -299,6 +301,15 @@ mod tests {
         let (w, h, rgba) = decode_png(std::io::Cursor::new(VR_GRAVITUDE_ROCK)).unwrap();
         assert_eq!((w, h), (1254, 1254));
         assert!(rgba.chunks_exact(4).all(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn bundled_vr_ice_keeps_the_native_mask() {
+        let (w, h, rgba) = decode_png(std::io::Cursor::new(VR_SNOW_JAM_ICE)).unwrap();
+        assert_eq!((w, h), (1254, 1254));
+        let alpha = rgba.chunks_exact(4).map(|p| p[3]);
+        assert_eq!(alpha.clone().min(), Some(0));
+        assert_eq!(alpha.max(), Some(156));
     }
 
     #[test]

@@ -825,6 +825,33 @@ full eye coverage does not establish acceptable image quality. A separate
 `SSX3_FRAME_DUMP=2` diagnostic run incurred substantial capture overhead
 and is excluded from the cadence comparison.
 
+### Snow Jam close ice texture (2026-10-31)
+
+A live pixel probe at the tick-2400 -90° view traced the blurred blue bands
+to terrain Bézier draw 92. Its first texture is the native 128×128 snow/ice
+image `b5f233a48a7355bb`; the second terrain pass uses another texture.
+The original has four narrow blue marks and an alpha range of 0–156, so
+the white outside those marks must not be assumed opaque. A faithful
+1254-square detailed reconstruction was generated from the source image;
+the image-edit prompt required the same four narrow tapered blue marks,
+white snow elsewhere, flat albedo and no new shapes. Its original alpha
+channel was resized bilinearly and restored. The new image is built into
+the VR-only texture pack, while an explicit local PNG
+with the same hash still takes precedence. Desktop uses the original.
+
+In the same 1920-square live -90° view, the close ice band has fine snow
+and ice detail instead of large blurred blocks and false-colour swirls.
+The forward view at tick 650 keeps the rider, course and spatial HUD in
+their original positions. A muted 2400-tick trial with the replacement
+measured 59.9 fresh stereo images/s over race frames 420–2401, compared
+with 59.9/s in the adjacent unmodified run; both eyes stayed filled and
+distinct. The built-in path preloaded 12 VR textures within its 64 MiB
+budget and reproduced the improved material. This corrects one prominent
+128×128 source asset; other close terrain textures and UV seams, including
+Gravitude's late-course snow, still need work. All 35 `ssx3-gfx` tests pass,
+and a desktop frame replay is byte-identical before and after this asset.
+Headset quality is unverified.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase
