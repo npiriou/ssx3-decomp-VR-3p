@@ -469,6 +469,7 @@ pub fn sky_native_panorama_panels(
     fade_upper_edge: bool,
     join_gravitude_upper: bool,
     blend_gravitude_horizon: bool,
+    fade_side_edges: bool,
 ) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
     use ssx3_render::gpu::{Link, Program};
     if call.program != Program::Mat3Mesh
@@ -561,9 +562,13 @@ pub fn sky_native_panorama_panels(
                 t
             };
             vertex[1][1] = (tex_v * 4096.0).round() as u32;
-            let edge = (if keep_start { 1.0 } else { s / 0.25 })
-                .min(if keep_end { 1.0 } else { (1.0 - s) / 0.25 })
-                .clamp(0.0, 1.0);
+            let edge = if fade_side_edges {
+                (if keep_start { 1.0 } else { s / 0.25 })
+                    .min(if keep_end { 1.0 } else { (1.0 - s) / 0.25 })
+                    .clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             let vertical = if upper {
                 if blend_horizon {
                     ((1.0 - t) * VERTICAL as f32 / OVERLAP_ROWS as f32).clamp(0.0, 1.0)
@@ -969,9 +974,17 @@ mod tests {
         }
         call.uniforms[4][1] = 6;
         let p = projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
-        let panels =
-            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), true, false, false)
-                .expect("Ruthless Ridge peak strip");
+        let panels = sky_native_panorama_panels(
+            &call,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            true,
+            false,
+            false,
+            true,
+        )
+        .expect("Ruthless Ridge peak strip");
         assert_eq!(panels.len(), 1);
         let panel = &panels[0];
         assert_eq!(panel.uniforms[4][1], 17 * 9);
@@ -986,13 +999,21 @@ mod tests {
         // Gravitude's neighbouring upper strips meet at -45° and 0°.
         // Keep their artwork opaque there; an unpaired outer edge must
         // still fade into the blue dome instead of exposing a hard wedge.
-        let joined_upper =
-            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), false, true, false)
-                .expect("joined upper sector");
+        let joined_upper = sky_native_panorama_panels(
+            &call,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            true,
+            false,
+            true,
+        )
+        .expect("joined upper sector");
         assert_eq!(joined_upper[0].data[2][3], 128);
         assert_eq!(joined_upper[0].data[8 * 4 + 2][3], 128);
         let crossfade_upper =
-            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), false, true, true)
+            sky_native_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), false, true, true, true)
                 .expect("crossfaded upper sector");
         assert_eq!(crossfade_upper[0].data[14 * 9 * 4 + 2][3], 128);
         assert_eq!(crossfade_upper[0].data[16 * 9 * 4 + 2][3], 0);
@@ -1004,9 +1025,17 @@ mod tests {
             vertex[0][0] = (((c * x + s * y) * 32768.0).round() as i32) as u32;
             vertex[0][1] = (((-s * x + c * y) * 32768.0).round() as i32) as u32;
         }
-        let outer =
-            sky_native_panorama_panels(&outer, p, [0.0, 0.0], (1024, 1024), false, true, false)
-                .expect("outer upper sector");
+        let outer = sky_native_panorama_panels(
+            &outer,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            true,
+            false,
+            true,
+        )
+        .expect("outer upper sector");
         assert_eq!(outer[0].data[2][3], 0);
         assert_eq!(outer[0].data[8 * 4 + 2][3], 128);
         for (source, wrapped) in [(1, 0), (0, bottom_left)] {
@@ -1046,17 +1075,55 @@ mod tests {
             }
         }
         lower.uniforms[4][1] = 15;
-        let faded =
-            sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), true, false, false)
-                .expect("lower sector");
-        let joined =
-            sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false, false, false)
-                .expect("joined lower sector");
+        let faded = sky_native_panorama_panels(
+            &lower,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            true,
+            false,
+            false,
+            true,
+        )
+        .expect("lower sector");
+        let joined = sky_native_panorama_panels(
+            &lower,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("joined lower sector");
         assert_eq!(faded[0].data[4 * 4 + 2][3], 0);
         assert_eq!(joined[0].data[4 * 4 + 2][3], 128);
-        let crossfade_lower =
-            sky_native_panorama_panels(&lower, p, [0.0, 0.0], (1024, 1024), false, true, true)
-                .expect("crossfaded lower sector");
+        // Snow Jam's adjacent sectors should meet without a blue alpha seam.
+        let seamless = sky_native_panorama_panels(
+            &lower,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("seamless lower sector");
+        assert_eq!(seamless[0].data[2][3], 128);
+        assert_eq!(seamless[0].data[8 * 4 + 2][3], 128);
+        let crossfade_lower = sky_native_panorama_panels(
+            &lower,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            true,
+            true,
+            true,
+        )
+        .expect("crossfaded lower sector");
         assert_eq!(crossfade_lower[0].uniforms[4][1], 19 * 9);
         assert_eq!(crossfade_lower[0].data[1][1], 0);
         assert!(crossfade_lower[0].data[2 * 9 * 4 + 1][1] > 0);

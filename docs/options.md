@@ -26,6 +26,12 @@ configuration. The plain command above is the recommended way to play.
 
 **Experimental SteamVR front end** (`ssx3-vr`):
 
+On Windows, the VR front end polls an Xbox-compatible pad through XInput
+and passes its buttons and sticks to the game's native controller path.
+The first connected XInput slot takes priority; Gilrs remains a fallback
+for other conventional pads. `SSX3_PAD_DEBUG=1` logs received input changes.
+SteamVR motion controllers are not mapped to game controls yet.
+
 `ssx3-vr --offline-pipeline 500` runs the independent game/render pipeline
 against a simulated 72 Hz presenter, without SteamVR. It mutes audio and
 stops the game worker at exactly the requested tick. It reports game,
@@ -60,7 +66,8 @@ that gate.
 | --- | --- |
 | `SSX3_VR_EYE_SIZE=<pixels>` | Internal square eye target, 512–3840. The OpenXR recommended per-eye size is the default; the program logs both sizes. |
 | `SSX3_VR_UNITS_PER_M=<units>` | Game units per physical metre for head position and stereo separation (default 100). |
-| `SSX3_VR_UI_WIDTH_M=<metres>` / `SSX3_VR_UI_HEIGHT_M=<metres>` | Width and height of the race HUD or menu plane (defaults 2.0 m and 1.5 m, following the Ratchet VR panel's placement). |
+| `SSX3_VR_UI_WIDTH_M=<metres>` / `SSX3_VR_UI_HEIGHT_M=<metres>` | Width and height of the menu plane (defaults 2.0 m and 1.5 m). |
+| `SSX3_VR_HUD_WIDTH_M=<metres>` / `SSX3_VR_HUD_HEIGHT_M=<metres>` | Separate race HUD plane dimensions (defaults 2.8 m and 1.8 m), placing progress and boost farther into peripheral vision without enlarging menus. |
 | `SSX3_VR_UI_DISTANCE_M=<metres>` / `SSX3_VR_UI_HEIGHT_OFFSET_M=<metres>` | Distance from the chase camera and vertical offset of the spatial UI (defaults 2 m and 0 m). |
 | `SSX3_BLOOM=original` | Restore the game's full-screen bloom in VR. VR defaults to bloom off to avoid its repeated per-eye copies; the desktop default is unchanged. |
 | `SSX3_VR_MOTION_BLUR=1` | Restore the game's final frame blend in VR. VR normally presents the sharp eye image directly, avoiding a full-screen blend copy for each eye. |
@@ -75,7 +82,7 @@ that gate.
 | `SSX3_VR_SKY_INTIMIDATOR_PANO=0` | Disable Intimidator's VR sky reconstruction (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_GRAVITUDE_PANO=0` | Disable Gravitude's VR sky reconstruction (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_WRAP=1` | Enable the earlier experimental Ruthless Ridge sky-panel wrap for comparison; also set `SSX3_VR_SKY_RIDGE_PANO=0`. |
-| `SSX3_VR_SKY_TRACE_FROM=<frame>` | From this renderer frame onward, log the native sky texture sequence and the VR sky mode actually selected (`snow`, `ridge`, `city`, `intimidator`, `gravitude`, `wrapped-ridge`, `sphere` or `native`). Useful when a course changes visible sky panels during a race. |
+| `SSX3_VR_SKY_TRACE_FROM=<frame>` | From this renderer frame onward, log the native sky texture sequence, the VR sky mode and the number of previously seen Snow Jam sectors restored after game-camera culling. |
 | `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
 | `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
 | `SSX3_VR_INSPECT_DRAW=<index>` | With `gfx_replay`, log a frame draw's material, texture IDs and VU/DIRECT calls; use with `SSX3_GFX_PROBE=x,y` to trace a pixel back to its draw and GPU call. |

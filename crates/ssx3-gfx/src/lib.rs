@@ -110,6 +110,8 @@ pub struct Inner {
     gs: gs::Gs,
     terrain_geometry: terrain_vr::GeometryCache,
     mesh_geometry: mesh_vr::Cache,
+    /// Snow Jam sky sectors survive the original chase camera's culling.
+    snow_sky_calls: HashMap<u16, ssx3_render::gpu::GpuCall>,
     vu: Box<[u8; 16384]>,
     texcache: HashMap<tex::TexKey, CachedTex>,
     /// The terrain bake's textures blurred (real-time lighting, flag 32768).
@@ -396,6 +398,7 @@ impl Renderer {
                 gs: gs::Gs::new(),
                 terrain_geometry: Default::default(),
                 mesh_geometry: Default::default(),
+                snow_sky_calls: HashMap::new(),
                 vu: Box::new([0; 16384]),
                 texcache: HashMap::new(),
                 bake_blur,
@@ -1600,6 +1603,7 @@ impl Inner {
             gs: std::mem::take(&mut self.gs),
             terrain_geometry: std::mem::take(&mut self.terrain_geometry),
             mesh_geometry: std::mem::take(&mut self.mesh_geometry),
+            snow_sky_calls: std::mem::take(&mut self.snow_sky_calls),
             vu: std::mem::replace(&mut self.vu, Box::new([0; 16384])),
             stats: self.stats,
             phase1_end: self.phase1_end,
@@ -1614,6 +1618,7 @@ impl Inner {
         self.gs = b.gs;
         self.terrain_geometry = b.terrain_geometry;
         self.mesh_geometry = b.mesh_geometry;
+        self.snow_sky_calls = b.snow_sky_calls;
         self.vu = b.vu;
         self.stats = b.stats;
         self.phase1_end = b.phase1_end;
@@ -3876,6 +3881,7 @@ struct Build {
     gs: gs::Gs,
     terrain_geometry: terrain_vr::GeometryCache,
     mesh_geometry: mesh_vr::Cache,
+    snow_sky_calls: HashMap<u16, ssx3_render::gpu::GpuCall>,
     vu: Box<[u8; 16384]>,
     stats: Stats,
     phase1_end: usize,
@@ -4028,6 +4034,7 @@ impl Build {
         // Match the ordered subset of its own texture sequence so the VR
         // backdrop does not switch to near-field native panels mid-race.
         const SNOW_SKY_TEXTURES: [u16; 9] = [281, 289, 288, 287, 282, 286, 285, 284, 283];
+        let mut snow_sky_seen = std::collections::HashSet::new();
         let mut snow_next = 0;
         let supported_panorama_sky = sky_draws >= 5
             && draws[0].tex[0] == Some(SNOW_SKY_TEXTURES[0])
@@ -4046,6 +4053,9 @@ impl Build {
             && std::env::var("SSX3_VR_SKY_PANORAMA").map_or(true, |v| v != "0");
         let snow_native_panels =
             panorama_sky && std::env::var("SSX3_VR_SKY_SNOW_NATIVE").as_deref() != Ok("0");
+        if !snow_native_panels {
+            b.snow_sky_calls.clear();
+        }
         let clean_snow_polar =
             panorama_sky && std::env::var("SSX3_VR_SKY_POLAR_CLEAN").map_or(true, |v| v != "0");
         let supported_ridge_sky = vr_sky_dome
@@ -4104,6 +4114,14 @@ impl Build {
                     .events
                     .iter()
                     .rposition(|(owner, _)| matches!(owner, Owner::Payload(0)))
+            })
+            .flatten();
+        let sky_end = vr_sky_dome
+            .then(|| {
+                built
+                    .events
+                    .iter()
+                    .rposition(|(owner, _)| matches!(owner, Owner::Payload(n) if *n < sky_draws))
             })
             .flatten();
         let terrain_mode = if vr_active {
@@ -4398,15 +4416,17 @@ impl Build {
                                     if vr_sky_dome && matches!(owner, Owner::Payload(0)) {
                                         sky_dome_calls.push(c.clone());
                                     }
-                                    // Snow Jam's first four 256x128 backdrop
-                                    // textures contain mountains but no sky.
+                                    // Snow Jam's four mountain-only 256x128
+                                    // backdrop textures contain no blue sky.
                                     // Stretching them around a tracked 360°
                                     // view turns the upper sky into a wall of
                                     // enlarged snow. The polar dome supplies
                                     // blue sky behind the actual course mesh.
                                     if panorama_sky
                                         && !snow_native_panels
-                                        && n.is_some_and(|n| (1..=4).contains(&n))
+                                        && n.is_some_and(|n| {
+                                            matches!(draws[n].tex[0], Some(289 | 288 | 287 | 282))
+                                        })
                                     {
                                         if !c.pre.is_empty() {
                                             b.gs.gif(&c.pre);
@@ -4455,12 +4475,21 @@ impl Build {
                                                             )
                                                             .as_deref()
                                                                 != Ok("0"),
+                                                        !snow_native_panels,
                                                     )
                                                 } else {
                                                     vr::sky_panorama_panels(&c, matrix.view_proj)
                                                 }
                                             });
                                         if let Some(panels) = panels {
+                                            if snow_native_panels {
+                                                if let Some(texture) =
+                                                    n.and_then(|n| draws[n].tex[0])
+                                                {
+                                                    snow_sky_seen.insert(texture);
+                                                    b.snow_sky_calls.insert(texture, c.clone());
+                                                }
+                                            }
                                             for panel in panels {
                                                 let first = b.gs.batches.len();
                                                 b.gs.gpu_draw(panel);
@@ -4638,6 +4667,53 @@ impl Build {
                         }
                     }
                     sky_dome_calls.clear();
+                }
+                if Some(i) == sky_end && snow_native_panels {
+                    // The original chase camera culls sky sectors outside
+                    // its view. Rebuild those seen earlier for a turned eye.
+                    if let Some(matrix) = built.frame.matrices.first() {
+                        let xy = b.gs.ctx[0].xyoffset;
+                        let xyoffset = [
+                            (xy & 0xffff) as f32 / 16.0,
+                            ((xy >> 32) & 0xffff) as f32 / 16.0,
+                        ];
+                        let missing: Vec<_> = SNOW_SKY_TEXTURES[1..]
+                            .iter()
+                            .filter(|texture| !snow_sky_seen.contains(texture))
+                            .filter_map(|texture| b.snow_sky_calls.get(texture).cloned())
+                            .collect();
+                        if sky_trace && !missing.is_empty() {
+                            eprintln!(
+                                "[vr-sky] restored {} culled Snow Jam sectors",
+                                missing.len()
+                            );
+                        }
+                        for source in missing {
+                            if let Some(panels) = vr::sky_native_panorama_panels(
+                                &source,
+                                matrix.view_proj,
+                                xyoffset,
+                                b.gs.size,
+                                false,
+                                false,
+                                false,
+                                false,
+                            ) {
+                                for panel in panels {
+                                    let first = b.gs.batches.len();
+                                    b.gs.gpu_draw(panel);
+                                    for batch in &mut b.gs.batches[first..] {
+                                        if batch.gpu.is_some() {
+                                            batch.state.prim |= 1 << 6;
+                                            batch.state.ctx.alpha = 0x44;
+                                            batch.state.ctx.test &= !1;
+                                            batch.state.ctx.zbuf |= 1 << 32;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if !phase2_started {

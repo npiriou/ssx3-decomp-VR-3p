@@ -2190,6 +2190,7 @@ dependencies = [
  "env_logger",
  "font8x8",
  "gilrs",
+ "libloading 0.8.9",
  "log",
  "pollster",
  "ssx3-core",

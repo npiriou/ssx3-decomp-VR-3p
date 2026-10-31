@@ -145,7 +145,7 @@ impl GameWorker {
                         );
                     }
                     if available == 0 {
-                        eprintln!("[vr pad] no connected gamepad detected");
+                        eprintln!("[vr pad] no WGI gamepad detected at startup");
                     }
                 }
                 let game_hz = ssx3_ps2::machine::vsync_hz() as f64 / 1.001;
@@ -236,6 +236,9 @@ impl Drop for GameWorker {
 
 #[path = "../vr_camera.rs"]
 mod vr_camera;
+#[cfg(windows)]
+#[path = "../xinput_pad.rs"]
+mod xinput_pad;
 
 #[allow(dead_code)]
 #[path = "../game.rs"]
@@ -272,6 +275,35 @@ fn pad_bit(button: Button) -> Option<u16> {
 fn update_pad(gilrs: &mut Option<Gilrs>, cpu: &mut ssx3_ps2::Cpu) {
     let mut buttons = ssx3_game::event_boot::pad_buttons();
     let mut sticks = [0x80u8; 4];
+    let mut direct_pad = false;
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+        static LAST_SLOT: AtomicU32 = AtomicU32::new(u32::MAX);
+        static LAST_DEBUG_STATE: AtomicU64 = AtomicU64::new(0);
+        if let Some(pad) = xinput_pad::first_connected() {
+            direct_pad = true;
+            buttons |= pad.buttons;
+            sticks = pad.sticks;
+            if LAST_SLOT.swap(pad.slot, Ordering::Relaxed) != pad.slot {
+                eprintln!("[vr pad] XInput slot {} active", pad.slot);
+            }
+            if std::env::var_os("SSX3_PAD_DEBUG").is_some() {
+                let state = ((pad.buttons as u64) << 32) | u32::from_le_bytes(pad.sticks) as u64;
+                if LAST_DEBUG_STATE.swap(state, Ordering::Relaxed) != state
+                    && (pad.buttons != 0
+                        || pad.sticks.iter().any(|value| value.abs_diff(0x80) > 32))
+                {
+                    eprintln!(
+                        "[vr pad] XInput buttons {:04x}, sticks {:02x?}",
+                        pad.buttons, pad.sticks
+                    );
+                }
+            }
+        } else if LAST_SLOT.swap(u32::MAX, Ordering::Relaxed) != u32::MAX {
+            eprintln!("[vr pad] XInput controller disconnected");
+        }
+    }
     if let Some(g) = gilrs {
         while let Some(event) = g.next_event() {
             match event.event {
@@ -301,7 +333,7 @@ fn update_pad(gilrs: &mut Option<Gilrs>, cpu: &mut ssx3_ps2::Cpu) {
                 _ => {}
             }
         }
-        if let Some((_, pad)) = g.gamepads().next() {
+        if let Some((_, pad)) = g.gamepads().next().filter(|_| !direct_pad) {
             for button in [
                 Button::Select,
                 Button::LeftThumb,
@@ -406,6 +438,8 @@ fn vr_panel_config(units_per_metre: f32) -> xr_wgpu_session::PanelConfig {
     xr_wgpu_session::PanelConfig {
         width: ui_setting("SSX3_VR_UI_WIDTH_M", 2.0, 0.5, 3.0) * units_per_metre,
         height: ui_setting("SSX3_VR_UI_HEIGHT_M", 1.5, 0.5, 3.0) * units_per_metre,
+        hud_width: ui_setting("SSX3_VR_HUD_WIDTH_M", 2.8, 1.0, 3.5) * units_per_metre,
+        hud_height: ui_setting("SSX3_VR_HUD_HEIGHT_M", 1.8, 0.5, 3.0) * units_per_metre,
         distance: ui_setting("SSX3_VR_UI_DISTANCE_M", 2.0, 1.0, 5.0) * units_per_metre,
         y: ui_setting("SSX3_VR_UI_HEIGHT_OFFSET_M", 0.0, -1.0, 1.0) * units_per_metre,
     }
@@ -513,9 +547,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     let units_per_metre = vr_units_per_metre();
     let panel = vr_panel_config(units_per_metre);
     eprintln!(
-        "[vr] UI panel: {:.2}x{:.2}m at {:.2}m, height offset {:.2}m",
+        "[vr] menu panel: {:.2}x{:.2}m; race HUD: {:.2}x{:.2}m at {:.2}m, height offset {:.2}m",
         panel.width / units_per_metre,
         panel.height / units_per_metre,
+        panel.hud_width / units_per_metre,
+        panel.hud_height / units_per_metre,
         panel.distance / units_per_metre,
         panel.y / units_per_metre
     );

@@ -34,8 +34,12 @@ pub struct PanelEye {
 
 #[derive(Clone, Copy)]
 pub struct PanelConfig {
+    /// Menu card dimensions.
     pub width: f32,
     pub height: f32,
+    /// Race HUD dimensions; its original art sits near the texture edges.
+    pub hud_width: f32,
+    pub hud_height: f32,
     pub distance: f32,
     pub y: f32,
 }
@@ -187,7 +191,12 @@ impl PanelPass {
                 game_from_eye: panel_eyes[eye].game_from_eye,
                 clip: panel_eyes[eye].clip,
                 size_distance_height: [panel.width, panel.height, panel.distance, panel.y],
-                world_valid: [if sources.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                world_valid: [
+                    if sources.is_some() { 1.0 } else { 0.0 },
+                    panel.hud_width,
+                    panel.hud_height,
+                    0.0,
+                ],
             };
             let bytes = unsafe {
                 std::slice::from_raw_parts(

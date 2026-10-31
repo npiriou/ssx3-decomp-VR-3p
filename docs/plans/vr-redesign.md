@@ -28,6 +28,8 @@ Status: implementation in progress, 2026-10-31. This supersedes the implementati
   Gilrs button/stick mapping. Windows currently lists the 8BitDo as a BLE
   device, but Gilrs enumerated no controller in three offline runs; its
   controller mode or connection still needs confirmation before the trial.
+  The [Ultimate 2 Wireless manual](https://download.8bitdo.com/Manual/Controller/Ultimate/Ultimate-2-Wireless-Controller.pdf)
+  lists the 2.4G receiver or USB cable for Windows use.
   VR audio now rotates 3D emitter pan by the headset view, while desktop pan
   keeps its original path. An explicit audio-device selector allows the next
   PICO trial to route stereo output to `Pico Streaming Speaker`.
@@ -1014,6 +1016,33 @@ gap rose to 2.56° at p95 and 5.50° maximum during this fast turn; the
 renderer did not fit an additional retained-scene redraw between game ticks
 in that run. The actual headset compositor may correct some rotational
 error, but that needs a live measurement. All 12 VR executable tests pass.
+
+### Snow Jam headset feedback and follow-up (2026-10-31)
+
+The 1920-square live PICO run showed native mountain artwork in stereo, but
+the user saw intermittent gaps and faded blue vertical lines. The race HUD
+remained too central, and the 8BitDo pad did not control the rider. The run
+was stopped at the user's request. SteamVR focused the application and the
+audio mixer opened the PICO stereo playback device; neither the spatial
+audio effect nor the new controls has yet been judged in the headset.
+
+Windows exposed the 8BitDo as an Xbox 360 compatible XInput device while
+Gilrs/WGI delivered no button or axis changes. The VR executable now polls
+XInput directly before its Gilrs fallback. A muted offline run received
+actual XInput stick and button changes, confirming the input route is live.
+The race HUD has its own 2.8 by 1.8 m panel dimensions, while menus keep
+the 2.0 by 1.5 m panel. Offline eye captures show progress and boost farther
+from the center without cropping the menu.
+
+Snow Jam's panorama previously faded both side edges of every native sky
+sector, exposing the blue polar backdrop as vertical stripes. Those side
+fades are now disabled for Snow Jam. The game also culls some sky sectors
+as the chase camera moves; the renderer retains their original mesh calls
+and reconstructs missing sectors using the current camera matrix. The
+restoration occurs after the current sky calls to avoid duplicate panels.
+The 512-square offline four-direction survey filled both distinct eyes; the
+36 graphics and 13 VR executable tests pass. Headset comfort and the exact
+remaining sky behavior still need a user trial of this build.
 
 ## Product contract
 

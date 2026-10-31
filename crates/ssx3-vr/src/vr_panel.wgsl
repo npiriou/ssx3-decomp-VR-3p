@@ -51,9 +51,14 @@ fn fragment(input: VertexOut) -> @location(0) vec4<f32> {
         return vec4<f32>(world_color, 1.0);
     }
     let point = origin + t * ray;
+    let panel_size = select(
+        panel.size_distance_height.xy,
+        panel.world_valid.yz,
+        panel.world_valid.x > 0.5,
+    );
     let hud_uv = vec2<f32>(
-        0.5 + point.x / panel.size_distance_height.x,
-        0.5 - (point.y - panel.size_distance_height.w) / panel.size_distance_height.y,
+        0.5 + point.x / panel_size.x,
+        0.5 - (point.y - panel.size_distance_height.w) / panel_size.y,
     );
     if any(hud_uv < vec2<f32>(0.0)) || any(hud_uv > vec2<f32>(1.0)) {
         return vec4<f32>(world_color, 1.0);
