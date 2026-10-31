@@ -1,9 +1,41 @@
 # SSX 3 VR: renderer redesign after the first headset test
 
-Status: implementation in progress, 2026-10-30. This supersedes the implementation order in
+Status: implementation in progress, 2026-10-31. This supersedes the implementation order in
 [`vr.md`](vr.md); its scope and original acceptance goals still apply.
 
 ## Measured implementation status (2026-10-30)
+
+### Headset feedback and follow-up (2026-10-31)
+
+- In the first successful PICO race trial, the rider and course appeared in
+  depth in both eyes and the perceived frame rate was acceptable. The distant
+  Snow Jam mountain backdrop was absent most of the time; when it appeared,
+  the user reported eye strain. The HUD was readable but too central. The
+  user wants the 8BitDo pad and headset stereo sound in the next trial.
+- A complete muted ARA1 trace through game tick 2400 counted 1900 frames in
+  Snow Jam panorama mode and 347 native-sky fallbacks. Of those fallbacks,
+  291 used the same eight-panel sequence with sector 285 culled; the remaining
+  56 used five or six visible sectors. The Snow Jam guard now accepts ordered
+  subsets of its original texture sequence so the VR mapping stays active as
+  sectors are culled. Its four mountain-only panels are mapped onto the
+  distant sky shell, and the lower-panel top fade is removed to avoid a wide
+  blue gap. Frozen 1920-square forward and +90-degree stereo captures show
+  mountain art and separate eyes; the mountain-only stereo patch matches best
+  at about a one-pixel horizontal shift. The updated backdrop still requires
+  a PICO comfort check.
+- The HUD plane defaults to 2.0 by 1.5 metres at a two-metre distance, like
+  the Ratchet VR reference. VR gamepad polling already uses the desktop
+  Gilrs button/stick mapping. Windows currently lists the 8BitDo as a BLE
+  device, but Gilrs enumerated no controller in three offline runs; its
+  controller mode or connection still needs confirmation before the trial.
+  VR audio now rotates 3D emitter pan by the headset view, while desktop pan
+  keeps its original path. An explicit audio-device selector allows the next
+  PICO trial to route stereo output to `Pico Streaming Speaker`.
+- Three 1920-pixel offline runs through game tick 500 measured 47.3, 62.0
+  and 29.6 race ticks per second for the new backdrop, older backdrop and a
+  diagnostic draw skip. Another Rerac VR Cargo build was active on the same
+  machine during these runs, so the numbers cannot isolate sky cost. Repeat
+  the rate check when the build has stopped before the next headset trial.
 
 - Menu frames now publish that they have no world depth. The game's
   frame-indexed depth query previously waited 100 ms for every VR menu

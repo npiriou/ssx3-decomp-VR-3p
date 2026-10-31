@@ -1004,6 +1004,30 @@ pub(crate) const PAN_UP: FpuF32 = FpuF32(0x41c8_0000);
 
 pub(crate) const PAN_BACK: FpuF32 = FpuF32(0xc2c8_0000);
 
+/// Headset rotation from the game's chase-camera axes into the listener's
+/// axes. Only the VR front end sets this; desktop audio retains the game's
+/// original listener matrix and bit-exact pan calculation.
+static VR_AUDIO_VIEW: std::sync::Mutex<Option<[[f32; 3]; 3]>> = std::sync::Mutex::new(None);
+
+pub fn set_vr_audio_view(view: Option<[[f32; 3]; 3]>) {
+    *VR_AUDIO_VIEW.lock().unwrap() =
+        view.filter(|columns| columns.iter().flatten().all(|value| value.is_finite()));
+}
+
+fn rotate_vr_audio_direction(view: [[f32; 3]; 3], source: [FpuF32; 3]) -> [FpuF32; 3] {
+    let source = source.map(FpuF32::to_f32);
+    std::array::from_fn(|row| {
+        FpuF32::from_f32((0..3).map(|col| view[col][row] * source[col]).sum())
+    })
+}
+
+fn vr_audio_direction(source: [FpuF32; 3]) -> [FpuF32; 3] {
+    let Some(view) = *VR_AUDIO_VIEW.lock().unwrap() else {
+        return source;
+    };
+    rotate_vr_audio_direction(view, source)
+}
+
 /// A gp-relative float.
 pub(crate) fn gp_const(c: &mut Cpu, off: i32) -> FpuF32 {
     let gp = reg(c, GP);
@@ -1200,6 +1224,11 @@ pub fn ssx_audio_system_compute_3d_pan(c: &mut Cpu) {
             c.cycles += 3;
             let fixed = at(emitter, 0xa0).lw(c);
             set_reg(c, V0, fixed);
+            let pan_direction = if fixed != 0 {
+                [rx, ry, rz]
+            } else {
+                vr_audio_direction([rx, ry, rz])
+            };
             let azimuth = if fixed != 0 {
                 c.cycles += 3;
                 let right = at(emitter, 0xa4).lw(c);
@@ -1218,7 +1247,7 @@ pub fn ssx_audio_system_compute_3d_pan(c: &mut Cpu) {
                     pan_k::AZ_PI_ADD,
                     pan_k::AZ_PI_SUB,
                 ];
-                let angle = pan_angle(c, rx, rz, 3, k, 0x0028_5ab0)?;
+                let angle = pan_angle(c, pan_direction[0], pan_direction[2], 3, k, 0x0028_5ab0)?;
                 c.cycles += 4;
                 binary_angle(c, angle, pan_k::AZ_TO_ANGLE)
             };
@@ -1226,10 +1255,10 @@ pub fn ssx_audio_system_compute_3d_pan(c: &mut Cpu) {
             // Elevation.
             c.cycles += 12;
             at(out, 8).sh(c, azimuth);
-            let dx = sp0.read_fpu(c);
-            let dz = sp0.off(8).read_fpu(c);
+            let dx = pan_direction[0];
+            let dz = pan_direction[2];
             let xx = dx * dx;
-            let dy = sp0.off(4).read_fpu(c);
+            let dy = pan_direction[1];
             abi::set_fpr(c, 21, dy);
             let zz = dz * dz;
             abi::set_fpr(c, 1, zz);
@@ -2944,6 +2973,25 @@ pub fn ssx_audio_system_set_fade_gain(c: &mut Cpu) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn vr_listener_turns_the_sound_field_with_the_head() {
+        let right_turn = [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
+        let point = |x, y, z| {
+            rotate_vr_audio_direction(
+                right_turn,
+                [
+                    FpuF32::from_f32(x),
+                    FpuF32::from_f32(y),
+                    FpuF32::from_f32(z),
+                ],
+            )
+            .map(FpuF32::to_f32)
+        };
+        assert_eq!(point(0.0, 0.0, 100.0), [-100.0, 0.0, 0.0]);
+        assert_eq!(point(100.0, 0.0, 0.0), [0.0, 0.0, 100.0]);
+        assert_eq!(point(0.0, 25.0, 0.0), [0.0, 25.0, 0.0]);
+    }
     use crate::difftest::check;
     use crate::difftest::check_lohi;
     use crate::difftest::compare;

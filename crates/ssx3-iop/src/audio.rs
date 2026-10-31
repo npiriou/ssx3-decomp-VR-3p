@@ -243,9 +243,20 @@ fn start_device() -> Option<Ring> {
 fn open_stream(ring: Ring) -> Result<cpal::Stream, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("no default output device")?;
+    let device = if let Ok(wanted) = std::env::var("SSX3_AUDIO_DEVICE") {
+        let wanted = wanted.to_lowercase();
+        host.output_devices()
+            .map_err(|e| e.to_string())?
+            .find(|device| {
+                device
+                    .description()
+                    .is_ok_and(|description| description.name().to_lowercase().contains(&wanted))
+            })
+            .ok_or_else(|| format!("audio output containing {wanted:?} not found"))?
+    } else {
+        host.default_output_device()
+            .ok_or("no default output device")?
+    };
     let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let channels = supported.channels() as usize;
     let device_rate = supported.sample_rate();

@@ -132,6 +132,22 @@ impl GameWorker {
                     eprintln!("[vr pad] gamepad API unavailable: {err}");
                     None
                 });
+                if let Some(g) = gilrs.as_ref() {
+                    let mut available = 0;
+                    for (_, pad) in g.gamepads() {
+                        available += 1;
+                        eprintln!(
+                            "[vr pad] available: {} (vendor {:04x?}, product {:04x?}, mapping {:?})",
+                            pad.name(),
+                            pad.vendor_id(),
+                            pad.product_id(),
+                            pad.mapping_source()
+                        );
+                    }
+                    if available == 0 {
+                        eprintln!("[vr pad] no connected gamepad detected");
+                    }
+                }
                 let game_hz = ssx3_ps2::machine::vsync_hz() as f64 / 1.001;
                 let mut pacer = ssx3_game::tick::Pacer::default();
                 let mut clock = Instant::now();
@@ -260,10 +276,27 @@ fn update_pad(gilrs: &mut Option<Gilrs>, cpu: &mut ssx3_ps2::Cpu) {
         while let Some(event) = g.next_event() {
             match event.event {
                 gilrs::EventType::Connected => {
-                    eprintln!("[vr pad] connected: {}", g.gamepad(event.id).name())
+                    let pad = g.gamepad(event.id);
+                    eprintln!(
+                        "[vr pad] connected: {} (vendor {:04x?}, product {:04x?}, mapping {:?})",
+                        pad.name(),
+                        pad.vendor_id(),
+                        pad.product_id(),
+                        pad.mapping_source()
+                    );
                 }
                 gilrs::EventType::Disconnected => {
                     eprintln!("[vr pad] disconnected: {}", g.gamepad(event.id).name())
+                }
+                gilrs::EventType::ButtonPressed(button, code)
+                    if std::env::var_os("SSX3_PAD_DEBUG").is_some() =>
+                {
+                    eprintln!("[vr pad] pressed {button:?} (code {code:?})");
+                }
+                gilrs::EventType::AxisChanged(axis, value, code)
+                    if std::env::var_os("SSX3_PAD_DEBUG").is_some() && value.abs() > 0.5 =>
+                {
+                    eprintln!("[vr pad] axis {axis:?} {value:.2} (code {code:?})");
                 }
                 _ => {}
             }
@@ -371,8 +404,8 @@ fn vr_panel_config(units_per_metre: f32) -> xr_wgpu_session::PanelConfig {
             .unwrap_or(default)
     };
     xr_wgpu_session::PanelConfig {
-        width: ui_setting("SSX3_VR_UI_WIDTH_M", 1.3, 0.5, 3.0) * units_per_metre,
-        height: ui_setting("SSX3_VR_UI_HEIGHT_M", 1.3, 0.5, 3.0) * units_per_metre,
+        width: ui_setting("SSX3_VR_UI_WIDTH_M", 2.0, 0.5, 3.0) * units_per_metre,
+        height: ui_setting("SSX3_VR_UI_HEIGHT_M", 1.5, 0.5, 3.0) * units_per_metre,
         distance: ui_setting("SSX3_VR_UI_DISTANCE_M", 2.0, 1.0, 5.0) * units_per_metre,
         y: ui_setting("SSX3_VR_UI_HEIGHT_OFFSET_M", 0.0, -1.0, 1.0) * units_per_metre,
     }
@@ -475,6 +508,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut last_gaze_waited = 0u64;
     let mut pose_history = vr_camera::PoseHistory::default();
     let mut pose_misses = 0u64;
+    let mut no_render_since: Option<Instant> = None;
+    let mut paused_for_no_render = false;
     let units_per_metre = vr_units_per_metre();
     let panel = vr_panel_config(units_per_metre);
     eprintln!(
@@ -493,6 +528,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                         xr::SessionState::READY => {
                             gfx.with_queue_exclusive(|| session.begin(VIEW_TYPE))?;
                             running = true;
+                            no_render_since = None;
+                            paused_for_no_render = false;
                             progress.running.store(true, Ordering::Release);
                             game_rate_mark = Instant::now();
                             last_game_frames = progress.frames.load(Ordering::Acquire);
@@ -504,8 +541,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                         }
                         xr::SessionState::STOPPING => {
                             progress.running.store(false, Ordering::Release);
+                            ssx3_game::game::sound::ssxaudio::set_vr_audio_view(None);
                             gfx.with_queue_exclusive(|| session.end())?;
                             running = false;
+                            no_render_since = None;
+                            paused_for_no_render = false;
                             pose_history.clear();
                             if requested_exit {
                                 return Ok(());
@@ -526,6 +566,21 @@ fn run() -> Result<(), Box<dyn Error>> {
         let xr_wait_start = Instant::now();
         let frame = waiter.wait()?;
         stages.elapsed(0, xr_wait_start);
+        if frame.should_render {
+            no_render_since = None;
+            if paused_for_no_render {
+                progress.running.store(true, Ordering::Release);
+                paused_for_no_render = false;
+                eprintln!("[vr] headset rendering resumed; game resumed");
+            }
+        } else if no_render_since.get_or_insert_with(Instant::now).elapsed()
+            >= Duration::from_millis(500)
+            && !paused_for_no_render
+        {
+            progress.running.store(false, Ordering::Release);
+            paused_for_no_render = true;
+            eprintln!("[vr] headset stopped rendering; game paused");
+        }
         let xr_begin_start = Instant::now();
         gfx.with_queue_exclusive(|| stream.begin())?;
         stages.elapsed(1, xr_begin_start);
@@ -546,6 +601,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                 pose_history.record(eyes, &views);
             }
             current_eyes = eyes;
+            ssx3_game::game::sound::ssxaudio::set_vr_audio_view(eyes.map(|pair| {
+                std::array::from_fn(|column| {
+                    std::array::from_fn(|row| pair[0].view_from_game[column][row])
+                })
+            }));
             gfx.set_vr_eyes(eyes);
         }
         let display_hz = 1_000_000_000.0 / frame.predicted_display_period.as_nanos() as f64;

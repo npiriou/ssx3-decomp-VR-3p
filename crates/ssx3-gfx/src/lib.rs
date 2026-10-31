@@ -4024,29 +4024,28 @@ impl Build {
         let plan = Build::plan_vu_calls(b, built, &draws);
         let mut vu = VuReceiver::default();
         let mut sky_dome_calls = Vec::new();
-        // Snow Jam's race, big-air and slopestyle panel sequences share the
-        // native sky mesh, but the last three visible sectors differ. Keep
-        // the guard exact so another course cannot inherit this panorama.
-        let supported_panorama_sky = sky_draws >= 7
-            && [281, 289, 288, 287, 282]
-                .into_iter()
-                .enumerate()
-                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
-            && (sky_draws == 7
-                && matches!(
-                    [draws[5].tex[0], draws[6].tex[0]],
-                    [Some(286), Some(285)] | [Some(284), Some(283)]
-                )
-                || sky_draws >= 8
-                    && matches!(
-                        [draws[5].tex[0], draws[6].tex[0], draws[7].tex[0]],
-                        [Some(286), Some(285), Some(284)]
-                            | [Some(286), Some(285), Some(283)]
-                            | [Some(285), Some(284), Some(283)]
-                    ));
+        // The game culls Snow Jam sky sectors as the chase camera moves.
+        // Match the ordered subset of its own texture sequence so the VR
+        // backdrop does not switch to near-field native panels mid-race.
+        const SNOW_SKY_TEXTURES: [u16; 9] = [281, 289, 288, 287, 282, 286, 285, 284, 283];
+        let mut snow_next = 0;
+        let supported_panorama_sky = sky_draws >= 5
+            && draws[0].tex[0] == Some(SNOW_SKY_TEXTURES[0])
+            && draws[..sky_draws].iter().all(|draw| {
+                let Some(next) = SNOW_SKY_TEXTURES[snow_next..]
+                    .iter()
+                    .position(|&texture| draw.tex[0] == Some(texture))
+                else {
+                    return false;
+                };
+                snow_next += next + 1;
+                true
+            });
         let panorama_sky = vr_sky_dome
             && supported_panorama_sky
             && std::env::var("SSX3_VR_SKY_PANORAMA").map_or(true, |v| v != "0");
+        let snow_native_panels =
+            panorama_sky && std::env::var("SSX3_VR_SKY_SNOW_NATIVE").as_deref() != Ok("0");
         let clean_snow_polar =
             panorama_sky && std::env::var("SSX3_VR_SKY_POLAR_CLEAN").map_or(true, |v| v != "0");
         let supported_ridge_sky = vr_sky_dome
@@ -4405,7 +4404,10 @@ impl Build {
                                     // view turns the upper sky into a wall of
                                     // enlarged snow. The polar dome supplies
                                     // blue sky behind the actual course mesh.
-                                    if panorama_sky && n.is_some_and(|n| (1..=4).contains(&n)) {
+                                    if panorama_sky
+                                        && !snow_native_panels
+                                        && n.is_some_and(|n| (1..=4).contains(&n))
+                                    {
                                         if !c.pre.is_empty() {
                                             b.gs.gif(&c.pre);
                                         }
@@ -4429,7 +4431,8 @@ impl Build {
                                                 built.frame.matrices.get(draw.matrix as usize)
                                             })
                                             .and_then(|matrix| {
-                                                if ridge_panorama
+                                                if snow_native_panels
+                                                    || ridge_panorama
                                                     || city_panorama
                                                     || intimidator_panorama
                                                     || gravitude_panorama
@@ -4439,7 +4442,7 @@ impl Build {
                                                         matrix.view_proj,
                                                         xyoffset,
                                                         b.gs.size,
-                                                        !gravitude_panorama,
+                                                        !(snow_native_panels || gravitude_panorama),
                                                         gravitude_panorama
                                                             && std::env::var(
                                                                 "SSX3_VR_SKY_GRAVITUDE_SMOOTH",
