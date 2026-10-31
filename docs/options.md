@@ -41,6 +41,12 @@ mode can also capture a menu card without `SSX3_EVENT` or a simulated turn.
 It uses the same UI dimensions and world-unit setting as the live VR mode.
 The test runs the live two-eye world/HUD composition shader and waits for
 its GPU work. It excludes OpenXR swapchain and headset compositor time.
+`SSX3_VR_OFFLINE_END_HOLD_MS=6.5` is a synthetic diagnostic: it holds the
+shared Vulkan queue gate for 6.5 ms at the offline equivalent of
+`xrEndFrame`. It models only a CPU-side queue hold, not SteamVR's GPU work.
+`SSX3_VR_OFFLINE_SPLIT_POLL=0` selects the older coarse-lock presenter for
+an A/B comparison; the normal offline path waits for GPU completion outside
+that gate.
 
 | Variable | Effect |
 | --- | --- |

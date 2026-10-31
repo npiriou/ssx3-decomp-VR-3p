@@ -18,6 +18,7 @@ const TEST_FRAMES: u32 = 144;
 /// not an isolated measurement of either eye's GPU render time.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BlitTiming {
+    pub queue_wait_ms: f64,
     pub acquire_wait_ms: f64,
     pub encode_submit_ms: f64,
     pub gpu_wait_ms: f64,
@@ -316,6 +317,47 @@ impl OfflineStereoTarget {
         Ok(started.elapsed().as_secs_f64() * 1000.0)
     }
 
+    /// The same offline blit with GPU completion waited outside the Vulkan
+    /// queue gate. The published source textures stay alive in the caller's
+    /// VR snapshot until this method returns.
+    pub fn blit_stereo_with_queue_access(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        access: &Mutex<()>,
+        sources: Option<[&wgpu::TextureView; 2]>,
+        hud: &wgpu::TextureView,
+        panel_eyes: [PanelEye; 2],
+        panel: PanelConfig,
+    ) -> Result<(f64, f64), Box<dyn Error>> {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("SSX 3 VR offline staged stereo blit"),
+        });
+        self.panel.encode(
+            device,
+            queue,
+            &mut encoder,
+            &self.texture,
+            sources,
+            hud,
+            panel_eyes,
+            panel,
+        );
+        let commands = encoder.finish();
+        let lock_start = Instant::now();
+        let submitted = {
+            let _queue = access.lock().unwrap();
+            let lock_wait_ms = lock_start.elapsed().as_secs_f64() * 1000.0;
+            (queue.submit(Some(commands)), lock_wait_ms)
+        };
+        let started = Instant::now();
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submitted.0),
+            timeout: None,
+        })?;
+        Ok((submitted.1, started.elapsed().as_secs_f64() * 1000.0))
+    }
+
     /// Read the two *composited* layers, including the spatial HUD. This
     /// catches an eye that is blank after the last-stage shader even when the
     /// source eye textures are correct, and permits visual inspection.
@@ -606,6 +648,81 @@ impl StereoTarget {
         let release_start = Instant::now();
         swapchain.release_image()?;
         Ok(BlitTiming {
+            queue_wait_ms: 0.0,
+            acquire_wait_ms: (encode_start - acquire_start).as_secs_f64() * 1000.0,
+            encode_submit_ms: (gpu_start - encode_start).as_secs_f64() * 1000.0,
+            gpu_wait_ms: (release_start - gpu_start).as_secs_f64() * 1000.0,
+            release_ms: release_start.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+
+    /// Synchronize only operations that may use the OpenXR Vulkan queue.
+    /// The swapchain wait and wgpu submission-fence wait may block while the
+    /// game's renderer prepares its next scene. The caller keeps the source
+    /// snapshot alive through this method and still gates xrEndFrame.
+    pub fn blit_stereo_with_queue_access(
+        &self,
+        graphics: &WgpuXr,
+        access: &Mutex<()>,
+        sources: Option<[&wgpu::TextureView; 2]>,
+        hud: &wgpu::TextureView,
+        panel_eyes: [PanelEye; 2],
+        panel: PanelConfig,
+    ) -> Result<BlitTiming, Box<dyn Error>> {
+        let acquire_start = Instant::now();
+        let mut swapchain = self
+            .swapchain
+            .lock()
+            .map_err(|_| "OpenXR swapchain lock poisoned")?;
+        let mut queue_wait_ms = 0.0;
+        let t = Instant::now();
+        let index = {
+            let _queue = access.lock().unwrap();
+            queue_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+            swapchain.acquire_image()? as usize
+        };
+        swapchain.wait_image(xr::Duration::INFINITE)?;
+        let encode_start = Instant::now();
+        let texture = self
+            .textures
+            .get(index)
+            .ok_or("OpenXR image index out of range")?;
+        let mut encoder = graphics
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("SSX 3 VR staged game image blit"),
+            });
+        self.panel.encode(
+            &graphics.device,
+            &graphics.queue,
+            &mut encoder,
+            texture,
+            sources,
+            hud,
+            panel_eyes,
+            panel,
+        );
+        let commands = encoder.finish();
+        let t = Instant::now();
+        let submitted = {
+            let _queue = access.lock().unwrap();
+            queue_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+            graphics.queue.submit(Some(commands))
+        };
+        let gpu_start = Instant::now();
+        graphics.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submitted),
+            timeout: None,
+        })?;
+        let release_start = Instant::now();
+        let t = Instant::now();
+        {
+            let _queue = access.lock().unwrap();
+            queue_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+            swapchain.release_image()?;
+        }
+        Ok(BlitTiming {
+            queue_wait_ms,
             acquire_wait_ms: (encode_start - acquire_start).as_secs_f64() * 1000.0,
             encode_submit_ms: (gpu_start - encode_start).as_secs_f64() * 1000.0,
             gpu_wait_ms: (release_start - gpu_start).as_secs_f64() * 1000.0,

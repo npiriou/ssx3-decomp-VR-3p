@@ -931,6 +931,41 @@ is a safe ownership step, not a claimed frame-rate gain; queue locking still
 spans each complete render and OpenXR submission. G3 still needs a better
 submission schedule and live compositor measurements.
 
+### Staged queue access under a synthetic XR hold (2026-10-31)
+
+The buffered output slots above now allow the renderer to prepare the next
+scene while the presenter owns the previous snapshot. The renderer and
+presenter gate actual Vulkan queue submissions; command encoding and GPU
+fence waits run outside that gate. The live OpenXR path also gates swapchain
+image acquisition/release and `xrEndFrame`, while keeping the same world,
+HUD and pose snapshot alive through the blit. The offline runner uses the
+same staged blit by default. This is a queue ownership change; it has not
+yet been measured in SteamVR.
+
+The 6.5 ms synthetic `xrEndFrame` hold came from an older Re-RAC debug-build
+ETW trace and is a stress input, not a current measurement of the PICO.
+With that hold, a muted 1920-square Gravitude race over frames 420–1801
+measured 50.7 game ticks/s, 69.0 stereo submissions/s and 50.6 fresh
+images/s with the old coarse lock. The staged path measured 59.9, 71.9 and
+59.6/s respectively. The game's measured publication wait fell from
+11,192 ms total to 4 ms total on that race segment. The staged path used
+three output slots and had no visibility misses; its present age p95 was
+15.96 ms. These are separate runs on one PC, so they establish a useful
+offline regression result, not a headset frame-rate guarantee.
+
+Without synthetic hold, the staged path ran Gravitude through tick 3600
+at 59.9 game ticks/s, 72.0 stereo submissions/s and 59.7 fresh images/s
+over frames 420–3600. The final composite left/right PNGs match the earlier
+buffered path pixel-for-pixel; a frozen Snow Jam desktop replay also matches
+pixel-for-pixel. A menu run reached tick 500 with a spatial UI card, and all
+36 graphics tests pass. The retained-world diagnostic PNGs differ near the
+left edge; that diagnostic redraws a retained scene after the timed run,
+whereas the matching composite PNGs use the synchronized published snapshot.
+G3 remains open pending real SteamVR queue, compositor and headset timing,
+and G4 still
+requires visual judgment in the PICO. The 6000-frame race replay also passed
+the exact RAM baseline gate, and the VR compositor's shader test passes.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

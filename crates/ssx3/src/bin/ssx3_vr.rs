@@ -432,6 +432,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .filter(|&v| (512..=3840).contains(&v));
     let eye_size = fixed_eye_size.map_or_else(|| target.eye_size(), |size| (size, size));
     gfx.set_output_size(Some(eye_size));
+    let queue_access = gfx.queue_access_handle();
     eprintln!(
         "[vr] internal eye target: {}x{} (OpenXR recommended {}x{})",
         eye_size.0,
@@ -588,51 +589,67 @@ fn run() -> Result<(), Box<dyn Error>> {
             });
             stages.elapsed(9, refresh_start);
         }
-        let lock_start = Instant::now();
-        gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
-            stages.elapsed(2, lock_start);
-            let presentation = gfx.present_vr_snapshot();
-            if let Some(p) = presentation.as_ref() {
-                stages.push(3, p.age_ms);
+        let presentation = gfx.present_vr_snapshot();
+        if let Some(p) = presentation.as_ref() {
+            stages.push(3, p.age_ms);
+        }
+        let serial = presentation.as_ref().map_or(0, |p| p.serial);
+        let drawn_eyes = presentation.as_ref().and_then(|p| p.eyes);
+        if let (Some(now), Some(drawn)) = (current_eyes, drawn_eyes) {
+            stages.push(10, vr_camera::rotation_delta_deg(now[0], drawn[0]) as f64);
+        }
+        if frame.should_render && !no_submit {
+            let blit_start = Instant::now();
+            let mut queue_wait_ms = 0.0;
+            let mut submitted_fresh_stereo = false;
+            let mut presented_world = false;
+            if clear_only {
+                let t = Instant::now();
+                gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
+                    queue_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+                    target.clear_eyes(&graphics)
+                })?;
+            } else if let (Some(p), Some(eyes)) =
+                (presentation.as_ref(), drawn_eyes.or(current_eyes))
+            {
+                let sources = p.world.as_ref().map(|s| [&s[0].0, &s[1].0]);
+                presented_world = p.world.is_some();
+                let timing = target.blit_stereo_with_queue_access(
+                    &graphics,
+                    &queue_access,
+                    sources,
+                    &p.ui,
+                    panel_eyes(eyes),
+                    panel,
+                )?;
+                queue_wait_ms += timing.queue_wait_ms;
+                submitted_fresh_stereo = p.world.is_some() && serial != last_present_serial;
+                stages.push(4, timing.acquire_wait_ms);
+                stages.push(5, timing.encode_submit_ms);
+                stages.push(6, timing.gpu_wait_ms);
+                stages.push(7, timing.release_ms);
+            } else {
+                let t = Instant::now();
+                gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
+                    queue_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+                    target.clear_eyes(&graphics)
+                })?;
             }
-            let serial = presentation.as_ref().map_or(0, |p| p.serial);
-            let drawn_eyes = presentation.as_ref().and_then(|p| p.eyes);
-            if let (Some(now), Some(drawn)) = (current_eyes, drawn_eyes) {
-                stages.push(10, vr_camera::rotation_delta_deg(now[0], drawn[0]) as f64);
-            }
-            if frame.should_render && !no_submit {
-                let blit_start = Instant::now();
-                let mut submitted_fresh_stereo = false;
-                let mut presented_world = false;
-                if clear_only {
-                    target.clear_eyes(&graphics)?;
-                } else if let (Some(p), Some(eyes)) =
-                    (presentation.as_ref(), drawn_eyes.or(current_eyes))
-                {
-                    let sources = p.world.as_ref().map(|s| [&s[0].0, &s[1].0]);
-                    presented_world = p.world.is_some();
-                    let timing =
-                        target.blit_stereo(&graphics, sources, &p.ui, panel_eyes(eyes), panel)?;
-                    submitted_fresh_stereo = p.world.is_some() && serial != last_present_serial;
-                    stages.push(4, timing.acquire_wait_ms);
-                    stages.push(5, timing.encode_submit_ms);
-                    stages.push(6, timing.gpu_wait_ms);
-                    stages.push(7, timing.release_ms);
-                } else {
-                    target.clear_eyes(&graphics)?;
-                }
+            let submit_views: &[xr::View] = if presented_world {
+                drawn_eyes
+                    .and_then(|drawn| pose_history.views_for(drawn))
+                    .map(|pair| pair.as_slice())
+                    .unwrap_or_else(|| {
+                        pose_misses += 1;
+                        &views
+                    })
+            } else {
+                &views
+            };
+            let t = Instant::now();
+            gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
+                queue_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
                 let xr_end_start = Instant::now();
-                let submit_views: &[xr::View] = if presented_world {
-                    drawn_eyes
-                        .and_then(|drawn| pose_history.views_for(drawn))
-                        .map(|pair| pair.as_slice())
-                        .unwrap_or_else(|| {
-                            pose_misses += 1;
-                            &views
-                        })
-                } else {
-                    &views
-                };
                 target.submit_frame(
                     &mut stream,
                     frame.predicted_display_time,
@@ -641,15 +658,16 @@ fn run() -> Result<(), Box<dyn Error>> {
                     submit_views,
                 )?;
                 stages.elapsed(8, xr_end_start);
-                submitted += 1;
-                fresh_stereo += u64::from(submitted_fresh_stereo);
-                blit_ms += blit_start.elapsed().as_secs_f64() * 1000.0;
-                last_present_serial = serial;
-            } else {
-                stream.end(frame.predicted_display_time, blend, &[])?;
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+            stages.push(2, queue_wait_ms);
+            submitted += 1;
+            fresh_stereo += u64::from(submitted_fresh_stereo);
+            blit_ms += blit_start.elapsed().as_secs_f64() * 1000.0;
+            last_present_serial = serial;
+        } else {
+            gfx.with_queue_exclusive(|| stream.end(frame.predicted_display_time, blend, &[]))?;
+        }
         let frames = progress.frames.load(Ordering::Acquire);
         if game_rate_mark.elapsed() >= Duration::from_secs(5) {
             let elapsed = game_rate_mark.elapsed().as_secs_f64().max(1e-6);
@@ -735,6 +753,14 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     worker.progress.running.store(true, Ordering::Release);
     let started = Instant::now();
     let period = Duration::from_nanos(13_888_889); // local PICO: 72 Hz
+    let xr_end_hold = std::env::var("SSX3_VR_OFFLINE_END_HOLD_MS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && (0.0..=20.0).contains(v))
+        .map(|ms| Duration::from_secs_f64(ms / 1000.0))
+        .unwrap_or_default();
+    let split_poll = std::env::var("SSX3_VR_OFFLINE_SPLIT_POLL").as_deref() != Ok("0");
+    let queue_access = gfx.queue_access_handle();
     let timeout = Duration::from_secs(frames_to_run / 20 + 30);
     let mut next = Instant::now();
     let mut last_serial = 0;
@@ -847,12 +873,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             refresh_ms += t.elapsed().as_secs_f64() * 1000.0;
         }
         let lock_start = Instant::now();
-        gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
-            let wait_ms = lock_start.elapsed().as_secs_f64() * 1000.0;
-            lock_ms += wait_ms;
-            if game_frame >= 420 {
-                lock_waits_ms.push(wait_ms);
-            }
+        let mut present_once = || -> Result<(), Box<dyn Error>> {
             let presentation = gfx.present_vr_snapshot();
             if let Some(p) = presentation.as_ref() {
                 if game_frame >= 420 && p.world.is_some() {
@@ -861,15 +882,35 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                     }
                     present_ages_ms.push(p.age_ms);
                 }
-                let wait_ms = compositor.blit_stereo(
-                    &gpu.device,
-                    &gpu.queue,
-                    p.world.as_ref().map(|s| [&s[0].0, &s[1].0]),
-                    &p.ui,
-                    panel_eyes(p.eyes.unwrap_or(eyes)),
-                    panel,
-                )?;
+                let sources = p.world.as_ref().map(|s| [&s[0].0, &s[1].0]);
+                let (queue_wait_ms, wait_ms) = if split_poll {
+                    compositor.blit_stereo_with_queue_access(
+                        &gpu.device,
+                        &gpu.queue,
+                        &queue_access,
+                        sources,
+                        &p.ui,
+                        panel_eyes(p.eyes.unwrap_or(eyes)),
+                        panel,
+                    )?
+                } else {
+                    (
+                        lock_start.elapsed().as_secs_f64() * 1000.0,
+                        compositor.blit_stereo(
+                            &gpu.device,
+                            &gpu.queue,
+                            sources,
+                            &p.ui,
+                            panel_eyes(p.eyes.unwrap_or(eyes)),
+                            panel,
+                        )?,
+                    )
+                };
+                lock_ms += queue_wait_ms;
                 gpu_wait_ms += wait_ms;
+                if game_frame >= 420 {
+                    lock_waits_ms.push(queue_wait_ms);
+                }
                 submitted += 1;
                 if game_frame >= 420 {
                     blit_gpu_waits_ms.push(wait_ms);
@@ -889,13 +930,28 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                     }
                 }
                 last_serial = p.serial;
+                // Stress the same Vulkan queue exclusion that wraps
+                // xrEndFrame in the live path. This models a CPU hold only;
+                // it does not emulate SteamVR's GPU or compositor work.
+                if !xr_end_hold.is_zero() {
+                    if split_poll {
+                        gfx.with_queue_exclusive(|| std::thread::sleep(xr_end_hold));
+                    } else {
+                        std::thread::sleep(xr_end_hold);
+                    }
+                }
             } else {
                 let t = Instant::now();
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
                 gpu_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
             }
             Ok(())
-        })?;
+        };
+        if split_poll {
+            present_once()?;
+        } else {
+            gfx.with_queue_exclusive(present_once)?;
+        }
         let frame = worker.progress.frames.load(Ordering::Acquire);
         if frame >= 420 && race_mark.is_none() {
             race_mark = Some((
@@ -920,6 +976,15 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     gfx.flush();
     let output_slots = gfx.vr_output_slot_count();
     println!("offline VR output slots: {output_slots}");
+    if !xr_end_hold.is_zero() {
+        println!(
+            "offline synthetic xrEndFrame queue hold: {:.2}ms",
+            xr_end_hold.as_secs_f64() * 1000.0
+        );
+    }
+    if split_poll {
+        println!("offline GPU fence wait outside queue gate");
+    }
     if output_slots > 4 {
         return Err("VR output slot pool grew beyond the bounded handoff".into());
     }

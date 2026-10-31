@@ -599,6 +599,13 @@ impl Renderer {
         f()
     }
 
+    /// Shared Vulkan queue gate for staged compositor work. The caller must
+    /// hold it for queue writes/submissions and OpenXR calls that may use the
+    /// bound VkQueue, but can release it while waiting for a submitted fence.
+    pub fn queue_access_handle(&self) -> Arc<Mutex<()>> {
+        self.1.queue_access.clone()
+    }
+
     /// The game's HUD, rendered on transparent pixels for a spatial VR card.
     pub fn present_vr_ui_view(&self) -> Option<wgpu::TextureView> {
         let g = self.1.ui_present.lock().unwrap();
@@ -640,7 +647,6 @@ impl Renderer {
     pub fn refresh_vr_eyes(&self, eyes: [vr::Eye; 2]) -> bool {
         self.flush();
         let mut g = self.0.lock().unwrap();
-        let _queue = self.1.queue_access.lock().unwrap();
         if !g.refresh_vr_eyes(eyes) {
             return false;
         }
@@ -665,9 +671,10 @@ impl Renderer {
         if self.present_serial() != serial {
             return false;
         }
-        let Ok(_queue) = self.1.queue_access.try_lock() else {
+        let Ok(queue) = self.1.queue_access.try_lock() else {
             return false;
         };
+        drop(queue);
         if !g.refresh_vr_eyes(eyes) {
             return false;
         }
@@ -687,7 +694,6 @@ impl Renderer {
     /// the nonblocking path above handles ordinary motion between ticks.
     pub fn refresh_vr_eyes_after_jump(&self, eyes: [vr::Eye; 2]) -> bool {
         let mut g = self.0.lock().unwrap();
-        let _queue = self.1.queue_access.lock().unwrap();
         if !g.refresh_vr_eyes(eyes) {
             return false;
         }
@@ -1207,7 +1213,11 @@ impl Inner {
                 multiview_mask: None,
             });
         }
-        self.queue.submit(std::iter::once(enc.finish()));
+        let commands = enc.finish();
+        {
+            let _queue = self.shared.queue_access.lock().unwrap();
+            self.queue.submit(std::iter::once(commands));
+        }
         self.targets = Some(Targets {
             w,
             h,
@@ -1404,9 +1414,16 @@ impl Inner {
             .or_insert_with(|| draw::sampler(&self.dev, sk, aniso))
             .clone();
         let frame = self.stats.frames;
-        let view = self
-            .bake_blur
-            .blurred(&self.dev, &self.queue, (key, sk), &src, &samp, frame);
+        let access = self.shared.queue_access.clone();
+        let view = self.bake_blur.blurred(
+            &self.dev,
+            &self.queue,
+            &access,
+            (key, sk),
+            &src,
+            &samp,
+            frame,
+        );
         Some((view, amax))
     }
 
@@ -1564,8 +1581,7 @@ impl Inner {
 
     /// Render a frame.
     pub fn render(&mut self, built: &Built, mem: &(dyn Mem + Sync)) {
-        let access = self.shared.queue_access.clone();
-        let _queue = self.render_one(built, mem, &access);
+        self.render_one(built, mem);
         *self.shared.present.lock().unwrap() =
             (!self.present.is_empty()).then(|| (self.present.clone(), web_time::Instant::now()));
         *self.shared.present_eyes.lock().unwrap() = self.rendered_eyes;
@@ -1605,12 +1621,7 @@ impl Inner {
         self.zscale = b.zscale;
     }
 
-    fn render_one<'a>(
-        &mut self,
-        built: &Built,
-        mem: &(dyn Mem + Sync),
-        access: &'a Mutex<()>,
-    ) -> std::sync::MutexGuard<'a, ()> {
+    fn render_one(&mut self, built: &Built, mem: &(dyn Mem + Sync)) {
         self.stats.frames += 1;
         self.rendered_eyes = None;
         let recycled = self
@@ -1676,7 +1687,6 @@ impl Inner {
             self.vr_world_slot = None;
             self.vr_ui_slot = None;
         }
-        let queue = access.lock().unwrap();
         if let (Some(eyes), Some(source)) = (eyes, source) {
             self.vr_reprojections = eyes.map(|eye| {
                 built
@@ -1717,7 +1727,7 @@ impl Inner {
                 self.vr_ui = false;
                 self.vr_pending_scene = Some((geometry, inputs));
                 self.rendered_eyes = Some(eyes);
-                return queue;
+                return;
             }
         }
         if eyes.is_some() && source.is_none() {
@@ -1739,12 +1749,11 @@ impl Inner {
                 .store(self.frames_in, std::sync::atomic::Ordering::Release);
             self.shared.depth_ready.notify_all();
             self.gs.reuse_geometry_storage(geometry);
-            return queue;
+            return;
         }
         self.ui_present = None;
         self.draw_built(mem, &geometry, &inputs, &geometry.batches, false, false);
         self.gs.reuse_geometry_storage(geometry);
-        queue
     }
 
     fn refresh_vr_eyes(&mut self, eyes: [vr::Eye; 2]) -> bool {
@@ -3466,7 +3475,11 @@ impl Inner {
             buf
         });
         self.depth_parts[2] += t_buf.elapsed().as_secs_f64() * 1e3;
-        let sub_idx = self.queue.submit(std::iter::once(enc.finish()));
+        let commands = enc.finish();
+        let sub_idx = {
+            let _queue = self.shared.queue_access.lock().unwrap();
+            self.queue.submit(std::iter::once(commands))
+        };
         let t_sub = web_time::Instant::now();
         self.timing.1[2] += (t_sub - t_prepared).as_secs_f64() * 1e3;
         if let Some(buf) = depth_buf {
@@ -3614,7 +3627,11 @@ impl Inner {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit(std::iter::once(enc.finish()));
+        let commands = enc.finish();
+        {
+            let _queue = self.shared.queue_access.lock().unwrap();
+            self.queue.submit(std::iter::once(commands));
+        }
         let slice = buf.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = self.dev.poll(wgpu::PollType::wait_indefinitely());

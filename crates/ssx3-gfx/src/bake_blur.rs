@@ -108,6 +108,7 @@ impl<K: std::hash::Hash + Eq> BakeBlur<K> {
         &mut self,
         dev: &wgpu::Device,
         queue: &wgpu::Queue,
+        queue_access: &std::sync::Mutex<()>,
         key: K,
         src: &wgpu::Texture,
         samp: &wgpu::Sampler,
@@ -174,7 +175,9 @@ impl<K: std::hash::Hash + Eq> BakeBlur<K> {
             rp.draw(0..3, 0..1);
         }
         // (Before the frame that draws with it: submitted in order.)
-        queue.submit(std::iter::once(enc.finish()));
+        let commands = enc.finish();
+        let _queue = queue_access.lock().unwrap();
+        queue.submit(std::iter::once(commands));
         self.cache.insert(key, (view.clone(), frame));
         view
     }
