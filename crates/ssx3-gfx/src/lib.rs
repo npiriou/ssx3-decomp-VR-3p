@@ -4032,7 +4032,11 @@ impl Build {
                 .into_iter()
                 .enumerate()
                 .all(|(n, texture)| draws[n].tex[0] == Some(texture))
-            && (sky_draws == 7 && [draws[5].tex[0], draws[6].tex[0]] == [Some(286), Some(285)]
+            && (sky_draws == 7
+                && matches!(
+                    [draws[5].tex[0], draws[6].tex[0]],
+                    [Some(286), Some(285)] | [Some(284), Some(283)]
+                )
                 || sky_draws >= 8
                     && matches!(
                         [draws[5].tex[0], draws[6].tex[0], draws[7].tex[0]],

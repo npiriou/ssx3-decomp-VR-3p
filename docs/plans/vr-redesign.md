@@ -1179,6 +1179,27 @@ transparency, and anti-aliasing in the native renderer after full scene
 coverage; original PS2 texture detail will remain an asset constraint.
 Render UI separately at a resolution that keeps text sharp.
 
+### ARA1 mid-course four-direction survey (2026-10-31)
+
+The offline pipeline can now hold the game at an exact tick and advance one
+tick per gaze direction while rendering two 1920-square eyes. At ARA1 tick
+2400, the 0°, +90°, -90° and 180° views are all filled and stereo-distinct.
+The +90° image exposed two separate defects. A diagonal sky-panel edge came
+from a native seven-panel sequence ending in textures 284, 283, which the
+Snow Jam panorama guard had excluded; accepting that observed sequence
+removes the sky edge in a frozen replay and in the full offline pipeline.
+The detached snow patch remains. A pixel probe identifies it as native
+Bézier terrain draw 124, not a sky draw. An all-direction visibility scan
+increased the scene from about 160 to 285 candidate nodes and from 546 to
+821 draws, yet produced byte-identical +90° left-eye pixels. The 512-node
+list capacity is not reached. The next investigation is the terrain patch
+selection, LOD adjacency or mesh construction itself; G1 is still open.
+The all-direction scan was diagnostic and is not part of the default path.
+In the default muted 1920-square offline run, the game sustained 59.9
+ticks/s over 2400 ticks and produced 55.9 fresh stereo images/s over race
+frames 420–2400. This is below G3's 60-image minimum and excludes SteamVR
+compositor time.
+
 ## Implementation gates
 
 | Gate | Deliverable | Evidence required before the next gate |

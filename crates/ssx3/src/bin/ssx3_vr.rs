@@ -978,12 +978,6 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         }
     }
     worker.progress.running.store(false, Ordering::Release);
-    worker.progress.stop.store(true, Ordering::Release);
-    if let Some(thread) = worker.thread.take() {
-        thread
-            .join()
-            .map_err(|_| "Offline VR game worker panicked")?;
-    }
     gfx.flush();
     let output_slots = gfx.vr_output_slot_count();
     println!("offline VR output slots: {output_slots}");
@@ -1198,6 +1192,106 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             format!("{prefix}-right.png"),
             png::encode(right.0, right.1, &right.2),
         )?;
+    }
+    if let Ok(spec) = std::env::var("SSX3_VR_OFFLINE_SURVEY") {
+        let prefix = std::env::var("SSX3_VR_OFFLINE_SAVE")
+            .map_err(|_| "SSX3_VR_OFFLINE_SURVEY requires SSX3_VR_OFFLINE_SAVE")?;
+        let late_dump = std::env::var("SSX3_VR_OFFLINE_SURVEY_DUMP").as_deref() == Ok("1");
+        let yaws: Vec<f32> = spec
+            .split(',')
+            .map(|part| part.trim().parse::<f32>())
+            .collect::<Result<_, _>>()?;
+        if yaws.is_empty() || yaws.len() > 8 || yaws.iter().any(|yaw| !yaw.is_finite()) {
+            return Err("SSX3_VR_OFFLINE_SURVEY needs 1-8 finite yaw angles".into());
+        }
+        if late_dump {
+            ssx3_ps2::frame_sink::enable_frame_dump(2);
+        }
+        for (index, yaw_deg) in yaws.into_iter().enumerate() {
+            let yaw = yaw_deg.to_radians();
+            let (s, c) = yaw.sin_cos();
+            for eye in &mut eyes {
+                eye.view_from_game[0] = [c, 0.0, s, 0.0];
+                eye.view_from_game[2] = [-s, 0.0, c, 0.0];
+            }
+            gfx.set_vr_eyes(Some(eyes));
+            let generation = ssx3_game::game::main::ssxapp::set_vr_gaze([s, 0.0, c]);
+            let next_tick = worker.progress.frames.load(Ordering::Acquire) + 1;
+            worker
+                .progress
+                .frame_limit
+                .store(next_tick, Ordering::Release);
+            worker.progress.running.store(true, Ordering::Release);
+            let wait_started = Instant::now();
+            while worker.progress.frames.load(Ordering::Acquire) < next_tick {
+                if let Some(error) = worker.progress.error.lock().unwrap().clone() {
+                    return Err(error.into());
+                }
+                if worker
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.is_finished())
+                {
+                    return Err("Offline survey game worker stopped".into());
+                }
+                if wait_started.elapsed() > Duration::from_secs(5) {
+                    return Err("Offline survey tick timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            worker.progress.running.store(false, Ordering::Release);
+            gfx.flush();
+            if late_dump || std::env::var_os("SSX3_FRAME_DUMP").is_some() {
+                let dir = format!("{prefix}-survey-{index:02}-dump");
+                std::fs::create_dir_all(&dir)?;
+                ssx3_ps2::frame_sink::write_dumps(&dir)?;
+            }
+            if gfx.present_vr_visibility_epoch() < generation {
+                return Err("Offline survey gaze visibility was not published".into());
+            }
+            let presentation = gfx.present_vr_snapshot().ok_or("No survey presentation")?;
+            let drawn = presentation.eyes.ok_or("No tracked survey eyes")?;
+            if vr_camera::rotation_delta_deg(eyes[0], drawn[0]) > 0.1 {
+                return Err("Offline survey presented the wrong eye direction".into());
+            }
+            let stereo = presentation.world.as_ref().ok_or("No survey world")?;
+            compositor.blit_stereo(
+                &gpu.device,
+                &gpu.queue,
+                Some([&stereo[0].0, &stereo[1].0]),
+                &presentation.ui,
+                panel_eyes(drawn),
+                panel,
+            )?;
+            let [left, right] = compositor.read_eyes(&gpu.device, &gpu.queue)?;
+            let lit = |pixels: &[u32]| pixels.iter().filter(|&&p| p & 0x00ff_ffff != 0).count();
+            let differing = left.2.iter().zip(&right.2).filter(|(a, b)| a != b).count();
+            println!(
+                "offline survey yaw {yaw_deg:.1}° tick {next_tick}: left {}/{}, right {}/{}, stereo differs at {differing} pixels",
+                lit(&left.2), left.2.len(), lit(&right.2), right.2.len(),
+            );
+            if lit(&left.2) < left.2.len() * 9 / 10
+                || lit(&right.2) < right.2.len() * 9 / 10
+                || differing < left.2.len() / 20
+            {
+                return Err("Offline survey has an empty or duplicated eye".into());
+            }
+            for (side, eye) in [("left", left), ("right", right)] {
+                std::fs::write(
+                    format!("{prefix}-survey-{index:02}-{side}.png"),
+                    png::encode(eye.0, eye.1, &eye.2),
+                )?;
+            }
+        }
+        if gfx.vr_output_slot_count() > 4 {
+            return Err("VR output slot pool grew beyond the bounded handoff".into());
+        }
+    }
+    worker.progress.stop.store(true, Ordering::Release);
+    if let Some(thread) = worker.thread.take() {
+        thread
+            .join()
+            .map_err(|_| "Offline VR game worker panicked")?;
     }
     Ok(())
 }

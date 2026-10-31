@@ -39,6 +39,12 @@ reports the angular gap between the requested and rendered eye pose.
 Set `SSX3_VR_OFFLINE_SAVE=<prefix>` to save the final composited
 `<prefix>-left.png` and `<prefix>-right.png` for visual review. The offline
 mode can also capture a menu card without `SSX3_EVENT` or a simulated turn.
+With a save prefix, `SSX3_VR_OFFLINE_SURVEY=0,90,-90,180` advances one game
+tick per angle and writes both eyes as `<prefix>-survey-00-left.png`, etc.
+This tests the game's visibility selection for each direction rather than
+rotating a retained forward scene. `SSX3_VR_OFFLINE_SURVEY_DUMP=1` also saves
+the last two native frame dumps for each angle after enabling capture at the
+survey point, avoiding the cost of dumping the whole race.
 It uses the same UI dimensions and world-unit setting as the live VR mode.
 The test runs the live two-eye world/HUD composition shader and waits for
 its GPU work. It excludes OpenXR swapchain and headset compositor time.

@@ -426,10 +426,15 @@ pub fn on_signal_sema(c: &mut Cpu, id: i32) {
 
 static RING: Mutex<std::collections::VecDeque<Vec<u8>>> =
     Mutex::new(std::collections::VecDeque::new());
+static LATE_DUMP_KEEP: AtomicU64 = AtomicU64::new(0);
 
 const DUMP_MAGIC: &[u8; 8] = b"SSX3FRM1";
 
 fn dump_keep() -> Option<usize> {
+    let late = LATE_DUMP_KEEP.load(Ordering::Acquire) as usize;
+    if late != 0 {
+        return Some(late);
+    }
     static K: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
         std::env::var("SSX3_FRAME_DUMP")
@@ -437,6 +442,13 @@ fn dump_keep() -> Option<usize> {
             .and_then(|v| v.parse().ok())
             .filter(|&n| n > 0)
     })
+}
+
+/// Enable a bounded frame-dump ring after boot. This lets a VR diagnostic
+/// capture only the few gaze changes it needs, without copying RAM on every
+/// preceding game tick.
+pub fn enable_frame_dump(keep: usize) {
+    LATE_DUMP_KEEP.store(keep as u64, Ordering::Release);
 }
 
 fn encode(
