@@ -83,6 +83,8 @@ struct GameProgress {
     running: AtomicBool,
     stop: AtomicBool,
     frames: AtomicU64,
+    /// Offline capture only: stop exactly after this tick; zero means live play.
+    frame_limit: AtomicU64,
     tick_us: AtomicU64,
     status: Mutex<String>,
     error: Mutex<Option<String>>,
@@ -169,6 +171,11 @@ impl GameWorker {
                         let frames = state.frames.fetch_add(1, Ordering::Release) + 1;
                         if frames % 60 == 0 {
                             *state.status.lock().unwrap() = game::status(&cpu);
+                        }
+                        let limit = state.frame_limit.load(Ordering::Acquire);
+                        if limit != 0 && frames >= limit {
+                            state.running.store(false, Ordering::Release);
+                            break;
                         }
                     }
                     if plan.vsyncs == 0 {
@@ -749,6 +756,10 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     gfx.set_vr_eyes(Some(eyes));
     let mut gaze_generation = ssx3_game::game::main::ssxapp::set_vr_gaze([0.0, 0.0, 1.0]);
     ssx3_ps2::machine::set_realtime(true);
+    worker
+        .progress
+        .frame_limit
+        .store(frames_to_run, Ordering::Release);
     worker.start()?;
     worker.progress.running.store(true, Ordering::Release);
     let started = Instant::now();

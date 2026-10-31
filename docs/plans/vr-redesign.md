@@ -955,16 +955,33 @@ offline regression result, not a headset frame-rate guarantee.
 
 Without synthetic hold, the staged path ran Gravitude through tick 3600
 at 59.9 game ticks/s, 72.0 stereo submissions/s and 59.7 fresh images/s
-over frames 420–3600. The final composite left/right PNGs match the earlier
-buffered path pixel-for-pixel; a frozen Snow Jam desktop replay also matches
+over frames 420–3600. That run stopped at game tick 3600 while the reference
+stopped at 3601, so it was not a valid pixel-parity comparison. The offline
+worker now stops at exactly the requested tick. Repeating Gravitude at tick
+3601 produced four byte-identical world/composite left/right PNGs against
+the earlier buffered path. A frozen Snow Jam desktop replay also matches
 pixel-for-pixel. A menu run reached tick 500 with a spatial UI card, and all
-36 graphics tests pass. The retained-world diagnostic PNGs differ near the
-left edge; that diagnostic redraws a retained scene after the timed run,
-whereas the matching composite PNGs use the synchronized published snapshot.
-G3 remains open pending real SteamVR queue, compositor and headset timing,
-and G4 still
-requires visual judgment in the PICO. The 6000-frame race replay also passed
-the exact RAM baseline gate, and the VR compositor's shader test passes.
+36 graphics tests pass. G3 remains open pending real SteamVR queue, compositor
+and headset timing; G4 still requires visual judgment in the PICO. The
+6000-frame race replay passed the exact RAM baseline gate, and the VR
+compositor's shader test passes.
+
+An additional muted Snow Jam run swept the simulated head through 180° at
+18°/s starting at tick 1600, with the 6.5 ms synthetic queue hold. Over
+frames 420–2400 it delivered 59.9 game ticks/s, 71.9 stereo presentations/s
+and 59.8 new images/s. The tracked-eye angular gap was 0.52° at p95 and
+0.77° maximum; both final eyes were fully filled and distinct, with no
+visibility miss. The rear image shows the course rather than a blank or
+forward-camera panel. This remains an offline result; real SteamVR pacing
+and comfort are not yet verified.
+
+A faster 180°/s sweep from tick 600 to 1000, with the same synthetic hold,
+also kept both rear eyes filled and distinct. Race frames 420–1000 measured
+59.8 game ticks/s, 71.9 presentations/s and 59.5 new images/s. Angular
+gap rose to 2.56° at p95 and 5.50° maximum during this fast turn; the
+renderer did not fit an additional retained-scene redraw between game ticks
+in that run. The actual headset compositor may correct some rotational
+error, but that needs a live measurement. All 12 VR executable tests pass.
 
 ## Product contract
 

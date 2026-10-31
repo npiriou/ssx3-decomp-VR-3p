@@ -27,7 +27,8 @@ configuration. The plain command above is the recommended way to play.
 
 `ssx3-vr --offline-pipeline 500` runs the independent game/render pipeline
 against a simulated 72 Hz presenter, without SteamVR. It mutes audio and
-reports game, stereo presentation and fresh stereo rates after race frame 420,
+stops the game worker at exactly the requested tick. It reports game,
+stereo presentation and fresh stereo rates after race frame 420,
 plus p50/p95/max timer, queue-lock and blit waits. Fresh-image intervals
 include expected repeats when sampling a 60 Hz game at 72 Hz. It also checks
 that the VR output texture pool remains bounded.
