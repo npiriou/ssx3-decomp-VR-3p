@@ -469,7 +469,7 @@ pub fn sky_native_panorama_panels(
     fade_upper_edge: bool,
     join_gravitude_upper: bool,
     blend_gravitude_horizon: bool,
-    fade_side_edges: bool,
+    fade_all_side_edges: bool,
 ) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
     use ssx3_render::gpu::{Link, Program};
     if call.program != Program::Mat3Mesh
@@ -525,6 +525,23 @@ pub fn sky_native_panorama_panels(
     };
     let keep_start = smooth_gravitude && shared_edge(start);
     let keep_end = smooth_gravitude && shared_edge(end);
+    // Snow Jam has native mountain art only from +90° through -90°.
+    // Its neighbouring 45° sectors must meet opaquely; blend only the two
+    // outer boundaries into the polar blue dome.
+    let wrap_angle = |angle: f32| {
+        (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    };
+    let fade_start = if fade_all_side_edges {
+        !keep_start
+    } else {
+        wrap_angle(start - std::f32::consts::FRAC_PI_2).abs() < 0.02
+    };
+    let fade_end = if fade_all_side_edges {
+        !keep_end
+    } else {
+        wrap_angle(end + std::f32::consts::FRAC_PI_2).abs() < 0.02
+    };
+    let side_fade_width = if fade_all_side_edges { 0.25 } else { 0.5 };
     let blend_horizon =
         join_gravitude_upper && blend_gravitude_horizon && (shared_edge(start) || shared_edge(end));
     // Put the lower source behind the last two rows of the upper source.
@@ -562,13 +579,13 @@ pub fn sky_native_panorama_panels(
                 t
             };
             vertex[1][1] = (tex_v * 4096.0).round() as u32;
-            let edge = if fade_side_edges {
-                (if keep_start { 1.0 } else { s / 0.25 })
-                    .min(if keep_end { 1.0 } else { (1.0 - s) / 0.25 })
-                    .clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
+            let edge = (if fade_start { s / side_fade_width } else { 1.0 })
+                .min(if fade_end {
+                    (1.0 - s) / side_fade_width
+                } else {
+                    1.0
+                })
+                .clamp(0.0, 1.0);
             let vertical = if upper {
                 if blend_horizon {
                     ((1.0 - t) * VERTICAL as f32 / OVERLAP_ROWS as f32).clamp(0.0, 1.0)
@@ -1113,6 +1130,45 @@ mod tests {
         .expect("seamless lower sector");
         assert_eq!(seamless[0].data[2][3], 128);
         assert_eq!(seamless[0].data[8 * 4 + 2][3], 128);
+        let rotated = |degrees: f32| {
+            let mut sector = lower.clone();
+            let (sn, co) = degrees.to_radians().sin_cos();
+            for vertex in sector.data.chunks_exact_mut(4) {
+                let x = vertex[0][0] as i32 as f32 / 32768.0;
+                let y = vertex[0][1] as i32 as f32 / 32768.0;
+                vertex[0][0] = (((co * x - sn * y) * 32768.0).round() as i32) as u32;
+                vertex[0][1] = (((sn * x + co * y) * 32768.0).round() as i32) as u32;
+            }
+            sector
+        };
+        let first_snow = sky_native_panorama_panels(
+            &rotated(135.0),
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("first Snow Jam sector");
+        assert_eq!(first_snow[0].data[2][3], 0);
+        assert_eq!(first_snow[0].data[4 * 4 + 2][3], 128);
+        assert_eq!(first_snow[0].data[8 * 4 + 2][3], 128);
+        let last_snow = sky_native_panorama_panels(
+            &rotated(-90.0),
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("last Snow Jam sector");
+        assert_eq!(last_snow[0].data[2][3], 128);
+        assert_eq!(last_snow[0].data[4 * 4 + 2][3], 128);
+        assert_eq!(last_snow[0].data[8 * 4 + 2][3], 0);
         let crossfade_lower = sky_native_panorama_panels(
             &lower,
             p,

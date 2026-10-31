@@ -34,6 +34,8 @@ SteamVR motion controllers are not mapped to game controls yet.
 
 `ssx3-vr --offline-pipeline 500` runs the independent game/render pipeline
 against a simulated 72 Hz presenter, without SteamVR. It mutes audio and
+ignores physical controllers by default so their use cannot change a capture;
+`SSX3_VR_OFFLINE_PAD=1` enables live controller input for diagnostics. It
 stops the game worker at exactly the requested tick. It reports game,
 stereo presentation and fresh stereo rates after race frame 420,
 plus p50/p95/max timer, queue-lock and blit waits. Fresh-image intervals

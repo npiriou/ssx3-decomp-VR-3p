@@ -275,6 +275,14 @@ fn pad_bit(button: Button) -> Option<u16> {
 fn update_pad(gilrs: &mut Option<Gilrs>, cpu: &mut ssx3_ps2::Cpu) {
     let mut buttons = ssx3_game::event_boot::pad_buttons();
     let mut sticks = [0x80u8; 4];
+    // Keep physical pad use in another application out of offline captures.
+    // Event boot's scripted buttons still take effect.
+    if std::env::var("SSX3_VR_OFFLINE_PAD").as_deref() == Ok("0") {
+        let sif = &mut ssx3_ps2::m!(cpu).sif;
+        sif.pad_buttons[0] = buttons;
+        sif.pad_sticks[0] = sticks;
+        return;
+    }
     let mut direct_pad = false;
     #[cfg(windows)]
     {
@@ -828,6 +836,9 @@ fn run() -> Result<(), Box<dyn Error>> {
 /// a race; this mode always mutes audio during the offline measurement.
 fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
     std::env::set_var("SSX3_AUDIO", "0");
+    if std::env::var_os("SSX3_VR_OFFLINE_PAD").is_none() {
+        std::env::set_var("SSX3_VR_OFFLINE_PAD", "0");
+    }
     configure_vr_game();
     let gpu = ssx3_ps2::gpu::context().ok_or("No GPU for offline VR pipeline")?;
     let (mut worker, gfx) = GameWorker::boot()?;

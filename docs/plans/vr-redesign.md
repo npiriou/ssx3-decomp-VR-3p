@@ -1044,6 +1044,15 @@ The 512-square offline four-direction survey filled both distinct eyes; the
 36 graphics and 13 VR executable tests pass. Headset comfort and the exact
 remaining sky behavior still need a user trial of this build.
 
+A later mid-course survey at 45° and 90° exposed a diagonal hard edge in
+the mountain panorama. Inspection of the native sky meshes found four
+45-degree sectors spanning +90° to -90°; the rest has no mountain artwork.
+The renderer now keeps adjacent sector edges opaque and blends only the
+two outer boundaries over half a sector into the original blue polar sky.
+The graphics test checks those two boundaries and an interior join. Offline
+controller reads are disabled by default during captures so a physical pad
+being used elsewhere cannot steer the rider between survey points.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase
