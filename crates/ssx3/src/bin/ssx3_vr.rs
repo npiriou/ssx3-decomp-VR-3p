@@ -591,11 +591,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         let lock_start = Instant::now();
         gfx.with_queue_exclusive(|| -> Result<(), Box<dyn Error>> {
             stages.elapsed(2, lock_start);
-            if let Some(age) = gfx.present_age_ms() {
-                stages.push(3, age);
+            let presentation = gfx.present_vr_snapshot();
+            if let Some(p) = presentation.as_ref() {
+                stages.push(3, p.age_ms);
             }
-            let serial = gfx.present_serial();
-            let drawn_eyes = gfx.present_vr_eyes();
+            let serial = presentation.as_ref().map_or(0, |p| p.serial);
+            let drawn_eyes = presentation.as_ref().and_then(|p| p.eyes);
             if let (Some(now), Some(drawn)) = (current_eyes, drawn_eyes) {
                 stages.push(10, vr_camera::rotation_delta_deg(now[0], drawn[0]) as f64);
             }
@@ -605,15 +606,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let mut presented_world = false;
                 if clear_only {
                     target.clear_eyes(&graphics)?;
-                } else if let (Some(hud), Some(eyes)) =
-                    (gfx.present_vr_ui_view(), drawn_eyes.or(current_eyes))
+                } else if let (Some(p), Some(eyes)) =
+                    (presentation.as_ref(), drawn_eyes.or(current_eyes))
                 {
-                    let stereo = gfx.present_stereo_views();
-                    let sources = stereo.as_ref().map(|s| [&s[0].0, &s[1].0]);
-                    presented_world = stereo.is_some();
+                    let sources = p.world.as_ref().map(|s| [&s[0].0, &s[1].0]);
+                    presented_world = p.world.is_some();
                     let timing =
-                        target.blit_stereo(&graphics, sources, &hud, panel_eyes(eyes), panel)?;
-                    submitted_fresh_stereo = stereo.is_some() && serial != last_present_serial;
+                        target.blit_stereo(&graphics, sources, &p.ui, panel_eyes(eyes), panel)?;
+                    submitted_fresh_stereo = p.world.is_some() && serial != last_present_serial;
                     stages.push(4, timing.acquire_wait_ms);
                     stages.push(5, timing.encode_submit_ms);
                     stages.push(6, timing.gpu_wait_ms);
@@ -853,25 +853,20 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             if game_frame >= 420 {
                 lock_waits_ms.push(wait_ms);
             }
-            let serial = gfx.present_serial();
-            let stereo = gfx.present_stereo_views();
-            let hud = gfx.present_vr_ui_view();
-            if let Some(hud) = hud.as_ref() {
-                let rendered_eyes = gfx.present_vr_eyes();
-                if game_frame >= 420 && stereo.is_some() {
-                    if let Some(drawn) = rendered_eyes {
+            let presentation = gfx.present_vr_snapshot();
+            if let Some(p) = presentation.as_ref() {
+                if game_frame >= 420 && p.world.is_some() {
+                    if let Some(drawn) = p.eyes {
                         pose_errors.push(vr_camera::rotation_delta_deg(eyes[0], drawn[0]));
                     }
-                    if let Some(age) = gfx.present_age_ms() {
-                        present_ages_ms.push(age);
-                    }
+                    present_ages_ms.push(p.age_ms);
                 }
                 let wait_ms = compositor.blit_stereo(
                     &gpu.device,
                     &gpu.queue,
-                    stereo.as_ref().map(|s| [&s[0].0, &s[1].0]),
-                    hud,
-                    panel_eyes(rendered_eyes.unwrap_or(eyes)),
+                    p.world.as_ref().map(|s| [&s[0].0, &s[1].0]),
+                    &p.ui,
+                    panel_eyes(p.eyes.unwrap_or(eyes)),
                     panel,
                 )?;
                 gpu_wait_ms += wait_ms;
@@ -884,7 +879,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                             .push(now.duration_since(previous).as_secs_f64() * 1000.0);
                     }
                 }
-                let is_fresh = stereo.is_some() && serial != last_serial;
+                let is_fresh = p.world.is_some() && p.serial != last_serial;
                 fresh += u64::from(is_fresh);
                 if game_frame >= 420 && is_fresh {
                     let now = Instant::now();
@@ -893,7 +888,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                             .push(now.duration_since(previous).as_secs_f64() * 1000.0);
                     }
                 }
-                last_serial = serial;
+                last_serial = p.serial;
             } else {
                 let t = Instant::now();
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
@@ -923,6 +918,11 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             .map_err(|_| "Offline VR game worker panicked")?;
     }
     gfx.flush();
+    let output_slots = gfx.vr_output_slot_count();
+    println!("offline VR output slots: {output_slots}");
+    if output_slots > 4 {
+        return Err("VR output slot pool grew beyond the bounded handoff".into());
+    }
     if std::env::var_os("SSX3_FRAME_DUMP").is_some() {
         if let Some(prefix) = std::env::var_os("SSX3_VR_OFFLINE_SAVE") {
             let dir = format!("{}-dump", prefix.to_string_lossy());
@@ -1050,13 +1050,15 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
         {
             return Err("Offline head turn produced an empty or duplicated eye".into());
         }
-        let stereo = gfx.present_stereo_views().ok_or("No final stereo views")?;
-        let hud = gfx.present_vr_ui_view().ok_or("No final spatial HUD")?;
+        let presentation = gfx
+            .present_vr_snapshot()
+            .ok_or("No final VR presentation")?;
+        let stereo = presentation.world.as_ref().ok_or("No final stereo views")?;
         compositor.blit_stereo(
             &gpu.device,
             &gpu.queue,
             Some([&stereo[0].0, &stereo[1].0]),
-            &hud,
+            &presentation.ui,
             panel_eyes(eyes),
             panel,
         )?;
@@ -1088,14 +1090,14 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             return Err("Offline compositor produced an empty or duplicated eye".into());
         }
     } else if let Some(prefix) = std::env::var_os("SSX3_VR_OFFLINE_SAVE") {
-        let hud = gfx.present_vr_ui_view().ok_or("No final spatial UI")?;
-        let stereo = gfx.present_stereo_views();
+        let presentation = gfx.present_vr_snapshot().ok_or("No final spatial UI")?;
+        let stereo = presentation.world.as_ref();
         compositor.blit_stereo(
             &gpu.device,
             &gpu.queue,
-            stereo.as_ref().map(|s| [&s[0].0, &s[1].0]),
-            &hud,
-            panel_eyes(gfx.present_vr_eyes().unwrap_or(eyes)),
+            stereo.map(|s| [&s[0].0, &s[1].0]),
+            &presentation.ui,
+            panel_eyes(presentation.eyes.unwrap_or(eyes)),
             panel,
         )?;
         let [left, right] = compositor.read_eyes(&gpu.device, &gpu.queue)?;

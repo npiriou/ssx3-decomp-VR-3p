@@ -904,6 +904,33 @@ reused each frame, so narrowing the lock without separate published image
 storage could mix two game frames in a headset image. Keep the existing
 ownership guard until a safe buffered handoff is implemented and measured.
 
+### Buffered VR image ownership (2026-10-31)
+
+The renderer now selects a separate output slot for each new VR image. Each
+slot owns both world-eye textures and a spatial UI texture. A published
+snapshot holds its slot(s), pose and serial together; the OpenXR loop takes
+one snapshot and keeps it alive through its blit and frame submission. A
+retained-scene head refresh can redraw the world in a new slot while holding
+the previous UI slot, so a turn does not erase the HUD. The renderer recycles
+only slots no longer held by a published or in-use snapshot. The offline
+runner checks that the pool stays within four slots.
+
+Muted 1920-square-per-eye runs through Snow Jam tick 650, a menu at tick 500,
+and Gravitude tick 3600 all used two output slots. Gravitude held 59.8 fresh
+stereo images/s and 72.0 submissions/s over race frames 420–3601; its final
+left/right world and composite PNGs are byte-identical to the pre-buffered
+output. The menu still publishes a spatial UI card without a fake world
+image. All 36 gfx tests pass and a desktop ARA1 replay PNG is byte-identical.
+
+An A/B that released the Vulkan queue lock between the left eye, right eye
+and HUD passes preserved the final image but delivered only 58.8 fresh
+images/s on the same Gravitude race, with presented age p95 rising from about
+10 to 17.6 ms. The OpenXR-style presenter interleaved too often with the
+three render passes, so that lock split was reverted. The buffered handoff
+is a safe ownership step, not a claimed frame-rate gain; queue locking still
+spans each complete render and OpenXR submission. G3 still needs a better
+submission schedule and live compositor measurements.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

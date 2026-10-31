@@ -193,6 +193,11 @@ pub struct Inner {
     present: Vec<wgpu::Texture>,
     /// Transparent HUD image shared by the two VR eyes.
     ui_present: Option<wgpu::Texture>,
+    /// Completed VR output storage. A new frame never overwrites the slot
+    /// still held by the compositor's published snapshot.
+    vr_output_slots: Vec<Arc<VrOutputSlot>>,
+    vr_world_slot: Option<Arc<VrOutputSlot>>,
+    vr_ui_slot: Option<Arc<VrOutputSlot>>,
     /// Eye currently drawn, and game-clip to eye-clip transform.
     vr_eye: Option<(usize, [[f32; 4]; 4])>,
     rendered_eyes: Option<[vr::Eye; 2]>,
@@ -227,6 +232,32 @@ struct RetainedVrScene {
     published: Job,
     geometry: gs::FrameGeometry,
     inputs: DrawFrameInputs,
+}
+
+struct VrOutputSlot {
+    world: [wgpu::Texture; 2],
+    ui: wgpu::Texture,
+    eye_size: (u32, u32),
+}
+
+struct VrPublished {
+    world_slot: Arc<VrOutputSlot>,
+    ui_slot: Arc<VrOutputSlot>,
+    eyes: Option<[vr::Eye; 2]>,
+    serial: u64,
+    at: web_time::Instant,
+}
+
+/// One coherent set of completed world eyes, spatial UI and tracked poses.
+/// Keeping this value alive prevents the renderer from recycling its textures
+/// while OpenXR encodes a copy from them.
+pub struct VrPresentation {
+    pub world: Option<[(wgpu::TextureView, u32, u32); 2]>,
+    pub ui: wgpu::TextureView,
+    pub eyes: Option<[vr::Eye; 2]>,
+    pub serial: u64,
+    pub age_ms: f64,
+    _published: Arc<VrPublished>,
 }
 
 /// Values produced with one native frame and used by all of its eye draws.
@@ -283,6 +314,7 @@ pub struct Shared {
     /// Nash visibility generation of the latest fully rendered game scene.
     present_vr_visibility_epoch: std::sync::atomic::AtomicU64,
     ui_present: Mutex<Option<wgpu::Texture>>,
+    vr_published: Mutex<Option<Arc<VrPublished>>>,
     vr_eyes: Mutex<Option<[vr::Eye; 2]>>,
 }
 
@@ -400,6 +432,9 @@ impl Renderer {
                 pass_counts: [0; 6],
                 present: Vec::new(),
                 ui_present: None,
+                vr_output_slots: Vec::new(),
+                vr_world_slot: None,
+                vr_ui_slot: None,
                 vr_eye: None,
                 rendered_eyes: None,
                 vr_reprojections: std::array::from_fn(|_| Vec::new()),
@@ -485,6 +520,38 @@ impl Renderer {
         }))
     }
 
+    pub fn present_vr_snapshot(&self) -> Option<VrPresentation> {
+        let published = self.1.vr_published.lock().unwrap().as_ref()?.clone();
+        let world = published.eyes.map(|_| {
+            std::array::from_fn(|eye| {
+                let t = &published.world_slot.world[eye];
+                (
+                    t.create_view(&wgpu::TextureViewDescriptor {
+                        format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+                        ..Default::default()
+                    }),
+                    t.width(),
+                    t.height(),
+                )
+            })
+        });
+        let ui = published
+            .ui_slot
+            .ui
+            .create_view(&wgpu::TextureViewDescriptor {
+                format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+                ..Default::default()
+            });
+        Some(VrPresentation {
+            world,
+            ui,
+            eyes: published.eyes,
+            serial: published.serial,
+            age_ms: published.at.elapsed().as_secs_f64() * 1000.0,
+            _published: published,
+        })
+    }
+
     /// Generation of the latest complete present image set.
     pub fn present_serial(&self) -> u64 {
         self.1
@@ -517,6 +584,10 @@ impl Renderer {
     /// its bounded handoff channel.
     pub fn pending_frames(&self) -> usize {
         *self.1.pending.lock().unwrap()
+    }
+
+    pub fn vr_output_slot_count(&self) -> usize {
+        self.0.lock().unwrap().vr_output_slots.len()
     }
 
     /// Prevent the renderer worker from submitting to the shared Vulkan
@@ -575,9 +646,12 @@ impl Renderer {
         }
         *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
         *self.1.present_eyes.lock().unwrap() = g.rendered_eyes;
-        self.1
+        let serial = self
+            .1
             .present_serial
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
+        g.publish_vr_snapshot(serial);
         true
     }
 
@@ -599,9 +673,12 @@ impl Renderer {
         }
         *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
         *self.1.present_eyes.lock().unwrap() = g.rendered_eyes;
-        self.1
+        let serial = self
+            .1
             .present_serial
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
+        g.publish_vr_snapshot(serial);
         true
     }
 
@@ -616,9 +693,12 @@ impl Renderer {
         }
         *self.1.present.lock().unwrap() = Some((g.present.clone(), web_time::Instant::now()));
         *self.1.present_eyes.lock().unwrap() = g.rendered_eyes;
-        self.1
+        let serial = self
+            .1
             .present_serial
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
+        g.publish_vr_snapshot(serial);
         true
     }
 
@@ -988,6 +1068,74 @@ fn vr_box_bounds(
 }
 
 impl Inner {
+    fn publish_vr_snapshot(&self, serial: u64) {
+        *self.shared.vr_published.lock().unwrap() = self
+            .vr_world_slot
+            .as_ref()
+            .zip(self.vr_ui_slot.as_ref())
+            .filter(|_| self.ui_present.is_some())
+            .map(|(world_slot, ui_slot)| {
+                Arc::new(VrPublished {
+                    world_slot: world_slot.clone(),
+                    ui_slot: ui_slot.clone(),
+                    eyes: self.rendered_eyes,
+                    serial,
+                    at: web_time::Instant::now(),
+                })
+            });
+    }
+
+    fn begin_vr_output(&mut self, eye_size: (u32, u32), draw_ui: bool) {
+        self.vr_world_slot = None;
+        self.present.clear();
+        if draw_ui {
+            self.vr_ui_slot = None;
+            self.ui_present = None;
+        }
+        self.vr_output_slots
+            .retain(|slot| slot.eye_size == eye_size || Arc::strong_count(slot) > 1);
+        // A count of one means only the pool owns this slot. Published and
+        // in-flight OpenXR snapshots keep their slots above that count.
+        let slot = self
+            .vr_output_slots
+            .iter()
+            .find(|slot| slot.eye_size == eye_size && Arc::strong_count(slot) == 1)
+            .cloned()
+            .unwrap_or_else(|| {
+                let texture = |label, (w, h)| {
+                    self.dev.create_texture(&wgpu::TextureDescriptor {
+                        label: Some(label),
+                        size: wgpu::Extent3d {
+                            width: w,
+                            height: h,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_DST
+                            | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+                    })
+                };
+                let slot = Arc::new(VrOutputSlot {
+                    world: std::array::from_fn(|_| texture("ssx3-gfx VR eye present", eye_size)),
+                    ui: texture("ssx3-gfx VR UI present", (1024, 1024)),
+                    eye_size,
+                });
+                self.vr_output_slots.push(slot.clone());
+                slot
+            });
+        self.present = slot.world.to_vec();
+        if draw_ui {
+            self.ui_present = Some(slot.ui.clone());
+            self.vr_ui_slot = Some(slot.clone());
+        }
+        self.vr_world_slot = Some(slot);
+    }
+
     fn ensure_targets(&mut self, w: u32, h: u32) {
         if self.targets.as_ref().is_some_and(|t| t.w == w && t.h == h) {
             return;
@@ -1422,9 +1570,12 @@ impl Inner {
             (!self.present.is_empty()).then(|| (self.present.clone(), web_time::Instant::now()));
         *self.shared.present_eyes.lock().unwrap() = self.rendered_eyes;
         *self.shared.ui_present.lock().unwrap() = self.ui_present.clone();
-        self.shared
+        let serial = self
+            .shared
             .present_serial
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
+        self.publish_vr_snapshot(serial);
     }
 
     /// The build state, moved out of the renderer (see `Build`).
@@ -1515,6 +1666,16 @@ impl Inner {
             .iter()
             .filter(|m| m.view_proj[2][3].abs() > 0.5)
             .last();
+        if eyes.is_some() {
+            let (w, h) = geometry.state.size;
+            self.begin_vr_output(
+                self.out_size.unwrap_or((w * self.scale, h * self.scale)),
+                true,
+            );
+        } else {
+            self.vr_world_slot = None;
+            self.vr_ui_slot = None;
+        }
         let queue = access.lock().unwrap();
         if let (Some(eyes), Some(source)) = (eyes, source) {
             self.vr_reprojections = eyes.map(|eye| {
@@ -1605,6 +1766,11 @@ impl Inner {
             ])
         });
         if let Some(fallback) = fallback {
+            let (w, h) = scene.geometry.state.size;
+            self.begin_vr_output(
+                self.out_size.unwrap_or((w * self.scale, h * self.scale)),
+                false,
+            );
             self.vr_reprojections = eyes.map(|eye| {
                 scene
                     .published
