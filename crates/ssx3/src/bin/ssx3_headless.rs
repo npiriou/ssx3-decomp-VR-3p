@@ -206,6 +206,8 @@ fn main() {
                     ssx3_iop::audio::underrun_frames() as f64 / 48000.0,
                     ssx3_ps2::machine::audio_lead_frames() / 48
                 );
+                let (output, nonzero) = ssx3_iop::audio::output_frames();
+                eprintln!("[catch-up audio] device frames {output}, nonzero {nonzero}");
             }
         }
         let alive = ssx3_ps2::machine::run_frame(&mut c);

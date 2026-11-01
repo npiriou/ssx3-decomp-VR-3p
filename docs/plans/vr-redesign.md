@@ -1053,6 +1053,128 @@ The graphics test checks those two boundaries and an interior join. Offline
 controller reads are disabled by default during captures so a physical pad
 being used elsewhere cannot steer the rider between survey points.
 
+### Animated UI, particle depth and panorama follow-up (2026-10-31)
+
+The second headset report confirmed good controller input and fluid gameplay,
+but identified dark fringes on animated HUD/menu elements, uncomfortable glow
+effects, panorama joins and absent sound.
+
+- Spatial UI now records RGB transmittance in a separate floating-point
+  attachment. GS alpha remains intact for its original blend/test operations;
+  it is no longer mistaken for accumulated UI coverage. The final compositor
+  combines the encoded UI contribution and transmitted world before decoding
+  sRGB. A GPU regression covers overlapping translucent draws, masked alpha,
+  alpha-only writes and additive colour. An offline scripted run through tick
+  2650 shows the animated Setup Character screen without the former gray/black
+  fringe. `SSX3_INPUT` can reproduce these menu steps in the VR executable.
+- Particle sprites retain real homogeneous clip depth/W during stereo
+  projection. The optimized clip-distance shader also retains eye depth
+  instead of overwriting it with the old GS depth. A GPU test measures both
+  near/far stereo disparity and the actual depth attachment. Headset comfort
+  for torches/fireworks still needs confirmation.
+- Cached Snow Jam sectors use the current sky matrix. Never-seen sectors can
+  be reconstructed with their original textures; the immutable frame includes
+  those textures' pages even when the forward camera culled their draws.
+  Outer edge fades now follow artwork sector indices, rather than fixed
+  angles: native meshes have differing orientations. The open upper edge also
+  blends into the original polar sky. A frozen tick-2400 side-view comparison
+  removes the sharp diagonal blue/mountain cut. This does not repair the
+  separately recorded detached terrain patches.
+- A 1920-square offline run through tick 2400, before the final panorama-edge
+  refinement, measured 59.9 game ticks/s, 72.0 presentations/s and 59.6 fresh
+  stereo images/s. Both eyes remained filled and distinct at 0°, 45° and ±90°.
+  This remains below the strict 60-fresh-images/s target and excludes SteamVR.
+- Sound remains unresolved in the headset. The previous live WAV has normal
+  stereo energy (about -12.4 dBFS RMS), and device callbacks received nonzero
+  samples. A silent probe using the VR executable opened Pico Streaming
+  Speaker; Windows reported its session at 100%, unmuted, and its endpoint
+  unmuted. The user confirms other headset applications have sound and
+  deferred an audible comparison of the default Windows and explicit PICO
+  routes. No system audio settings were changed.
+
+`ssx3-vr --audio-diagnostics` opens the configured endpoint with silence for
+15 seconds, without booting the game or OpenXR. Its optional `--tone` flag
+plays a quiet three-second stereo tone for a coordinated listening check.
+Normal offline pipeline checks remain muted.
+
+Validation: 38 graphics tests, 41 native-render tests and the OpenXR panel
+shader test pass, including the GPU overlap/transmittance and particle
+disparity/depth regressions. The user deferred the audible test; no tone was
+played.
+
+The desktop, VR and headless executables build. A first cold 6000-tick RAM
+gate differed; a subsequent captured replay matched all 32 MiB of the stored
+baseline with empty `misses`. The cold-run discrepancy is not yet explained.
+The final 1920-square, 700-tick offline check measured 59.8 game ticks/s,
+72.0 presentations/s and 59.4 fresh stereo images/s over ticks 420–700;
+all four surveyed directions retained filled, distinct eyes.
+As the final smoke check, the native `ee-unwind` form used by the browser
+also builds and completes the 6000-tick replay with empty `misses` and RAM
+identical to the baseline. No actual WebAssembly/browser build was run.
+
+### Skybox and character-menu follow-up (2026-11-01)
+
+Headset feedback confirmed the animated UI improvement, but changing a rider
+temporarily shrank the menu. A perspective character preview had incorrectly
+selected the race HUD's larger panel; loading frames selected the smaller
+menu panel. Front-end frames now remain complete spatial cards even when
+they contain a perspective model. Course terrain identifies a gameplay
+scene, independently of whether a character model is currently loaded.
+
+Every background draw now has an explicit sky tag. Both GPU/native and
+already-projected CPU/GIF paths remove eye/head translation while preserving
+head rotation and each eye's projection, and draw the artwork at far depth
+without writing course depth. This applies even when a native sky variant
+does not match a reconstruction preset. A GPU regression covers both paths,
+opposite eye offsets, head translation and tiny source meshes inside the
+normal near plane.
+
+The shared native palette matcher accepts ordered subsets for every sky,
+instead of rigid full lists for individual courses. All palette texture
+pages are published before a turned view needs a culled sector. Missing
+upper strips follow their actual lower partners' orientation. Edge fades
+use mesh-instance adjacency, including repeated textures and both observed
+placements of the fourth panel; texture emission order does not determine
+spatial neighbours. Reconstruction uses current-frame native inputs rather
+than material state cached from an earlier frame. Unrecognized native
+pieces are retained instead of silently dropped.
+
+A frozen survey covers Snow Jam, Metro City, Ruthless Ridge, Intimidator,
+Gravitude and Much-2-Much at 0°, 90° and 180°. All 18 background-only stereo
+pairs are pixel-identical with symmetric test projections and have no reads
+outside their published texture pages. Separate world/particle tests retain
+finite-depth parallax. The background contact sheet is locally available at
+`target/vr-sky-survey-v4/contact.png`; original native art still limits detail.
+40 graphics, 43 native-render and one OpenXR-panel test pass. Headset comfort
+still requires a trial of the compiled build; no live headset run is started
+as part of these silent checks.
+
+The scripted Select Character test changes Zoe to Moby using the right arrow.
+All eight sampled loading frames keep `world false` and identical panel bounds
+`(264,320)–(775,703)` at 1024-square eye resolution. The loaded Setup Character
+preview has those same bounds. The 1920-square Snow Jam run through tick 2400
+then passes a four-direction world/HUD survey, with distinct world eyes and no
+frame-memory warnings. Race ticks 420–2400 measured 59.7 game ticks/s, 71.8
+presentations/s and 59.1 fresh stereo images/s; G3 remains open.
+The desktop, VR and headless builds succeed. A cold native replay differed
+in two high bytes of END tags at `0x625ed0` and `0x625ee0`; its warmed repeat
+matches all 32 MiB of the stored replay baseline with empty `misses`. This
+retains the previously recorded cold-run determinism caveat.
+The final `ee-unwind` headless build also succeeds; its 6000-frame replay
+matches all 32 MiB of the same baseline with empty `misses`. This checks the
+browser-compatible execution form locally, not an actual browser session.
+
+The subsequent live PICO trial was accepted by the user for the visuals.
+The game was stopped at the user's request before committing. Audio was
+inaudible during this latest trial, but the user clarifies that it worked
+in the trial roughly one hour earlier that exposed the remaining skybox
+defects. Treat this as an intermittent issue or a regression between those
+launches, rather than assuming the headset never received game audio.
+The latest launch explicitly selected `Pico Streaming Speaker`; its log
+confirms that endpoint opened and counted 30,066,000 nonzero device frames.
+Those counters establish host sample delivery, not audible headset output;
+the cause remains unresolved. Log: `target/vr-test-20261101-203342.err.log`.
+
 ## Product contract
 
 - Keep the native Rust SSX 3 game: one simulation, the existing rider, chase

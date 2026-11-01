@@ -20,6 +20,7 @@ fn vertex(@builtin(vertex_index) index: u32) -> VertexOut {
 @group(0) @binding(0) var game_image: texture_2d<f32>;
 @group(0) @binding(1) var game_sampler: sampler;
 @group(0) @binding(2) var hud_image: texture_2d<f32>;
+@group(0) @binding(4) var hud_transmission: texture_2d<f32>;
 
 struct Panel {
     game_from_eye: mat4x4<f32>,
@@ -28,6 +29,19 @@ struct Panel {
     world_valid: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> panel: Panel;
+
+// Compose in the GS encoded RGB space, then decode once for OpenXR.
+fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    return select(
+        color / 12.92,
+        pow((color + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
+        color > vec3<f32>(0.04045),
+    );
+}
+
+fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
+    return select(color * 12.92, 1.055 * pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055, color > vec3<f32>(0.0031308));
+}
 
 @fragment
 fn fragment(input: VertexOut) -> @location(0) vec4<f32> {
@@ -63,9 +77,8 @@ fn fragment(input: VertexOut) -> @location(0) vec4<f32> {
     if any(hud_uv < vec2<f32>(0.0)) || any(hud_uv > vec2<f32>(1.0)) {
         return vec4<f32>(world_color, 1.0);
     }
-    let hud = textureSample(hud_image, game_sampler, hud_uv);
-    // Some original GS HUD draws mask alpha writes while changing RGB.
-    let rgb_only = hud.a < 0.001 && any(hud.rgb > vec3<f32>(0.001));
-    let coverage = select(hud.a, 1.0, rgb_only);
-    return vec4<f32>(mix(world_color, hud.rgb, clamp(coverage, 0.0, 1.0)), 1.0);
+    let hud = textureSample(hud_image, game_sampler, hud_uv).rgb;
+    let transmission = textureSample(hud_transmission, game_sampler, hud_uv).rgb;
+    let encoded = clamp(hud + linear_to_srgb(world_color) * transmission, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(srgb_to_linear(encoded), 1.0);
 }

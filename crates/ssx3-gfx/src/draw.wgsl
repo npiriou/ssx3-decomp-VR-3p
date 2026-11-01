@@ -88,6 +88,7 @@ fn vs(v: VIn) -> VOut {
         let game_clip = vec4<f32>(o.pos.xy, 1.0 - 2.0 * v.pos.z, 1.0);
         let eye_clip = b.vr_reproject * game_clip;
         o.pos = vec4<f32>(eye_clip.xy, 0.5 * (eye_clip.w - eye_clip.z), eye_clip.w);
+        if (b.vr_mode == 2u) { o.pos.z = 0.0; }
     }
     o.col = v.col;
     o.stq = v.stq.xyz;
@@ -261,4 +262,35 @@ fn shade(v: VOut) -> vec4<f32> {
         oa = max(oa, 128.0);
     }
     return vec4<f32>(out, oa / 128.0);
+}
+
+// UI transmittance is separate from the GS alpha used by DATE and blending.
+struct UiOut {
+    @location(0) color: vec4<f32>,
+    @location(1) transmission: vec4<f32>,
+}
+fn ui_transmission(color: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
+    var factor = 0.0;
+    switch ((b.flags >> 20u) & 7u) {
+        case 1u: { factor = 1.0; }
+        case 2u: { factor = clamp(color.a, 0.0, 1.0); }
+        case 3u: { factor = 1.0 - clamp(color.a, 0.0, 1.0); }
+        case 4u: { factor = textureLoad(dst, vec2<i32>(position), 0).a; }
+        case 5u: { factor = 1.0 - textureLoad(dst, vec2<i32>(position), 0).a; }
+        case 6u: { factor = clamp(b.fix, 0.0, 1.0); }
+        case 7u: { factor = 1.0 - clamp(b.fix, 0.0, 1.0); }
+        default: {}
+    }
+    if ((b.flags & (1u << 24u)) != 0u) { factor = -factor; }
+    var transmission = vec3<f32>(factor);
+    if ((b.flags & (1u << 23u)) != 0u) {
+        let sign = select(1.0, -1.0, (b.flags & (1u << 25u)) != 0u);
+        transmission += sign * clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return vec4<f32>(transmission, 1.0);
+}
+@fragment
+fn fs_ui(v: VOut) -> UiOut {
+    let color = shade(v);
+    return UiOut(color, ui_transmission(color, v.pos.xy));
 }

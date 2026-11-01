@@ -43,6 +43,7 @@ pub const UNIFORM_STRIDE: u64 = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PipeKey {
+    pub spatial_ui: bool,
     pub blend: Option<(wgpu::BlendFactor, wgpu::BlendFactor, wgpu::BlendOperation)>,
     pub depth: wgpu::CompareFunction,
     pub depth_write: bool,
@@ -294,6 +295,7 @@ fn plans_unsplit(st: &DrawState, size: (u32, u32), rt_psm: Option<u32>) -> Vec<P
         pad: [0.0; 2],
     };
     let base = PipeKey {
+        spatial_ui: false,
         blend: bl,
         depth,
         depth_write: !zmsk && depth != wgpu::CompareFunction::Never,
@@ -336,6 +338,62 @@ fn plans_unsplit(st: &DrawState, size: (u32, u32), rt_psm: Option<u32>) -> Vec<P
         });
     }
     out
+}
+
+/// Record how much of the world survives each UI draw, independently of
+/// the GS alpha channel (which is scratch data, not accumulated coverage).
+pub fn spatial_ui(p: &mut Plan) {
+    use wgpu::{BlendFactor as F, BlendOperation as O};
+    p.key.spatial_ui = true;
+    let (source, dest, op) = p.key.blend.unwrap_or((F::One, F::Zero, O::Add));
+    let factor = match dest {
+        F::Zero => 0,
+        F::One => 1,
+        F::SrcAlpha => 2,
+        F::OneMinusSrcAlpha => 3,
+        F::DstAlpha => 4,
+        F::OneMinusDstAlpha => 5,
+        F::Constant => 6,
+        F::OneMinusConstant => 7,
+        _ => panic!("unsupported GS destination factor {dest:?}"),
+    };
+    p.u.flags |= factor << 20;
+    if source == F::Dst {
+        p.u.flags |= 1 << 23;
+    }
+    if op == O::Subtract {
+        p.u.flags |= 1 << 24;
+    }
+    if op == O::ReverseSubtract {
+        p.u.flags |= 1 << 25;
+    }
+}
+
+fn color_targets(
+    k: PipeKey,
+    blend: Option<wgpu::BlendState>,
+) -> Vec<Option<wgpu::ColorTargetState>> {
+    let mut targets = vec![Some(wgpu::ColorTargetState {
+        format: COLOR_FORMAT,
+        blend,
+        write_mask: wgpu::ColorWrites::from_bits_truncate(k.write as u32),
+    })];
+    if k.spatial_ui {
+        let multiply = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::Src,
+            operation: wgpu::BlendOperation::Add,
+        };
+        targets.push(Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba16Float,
+            blend: Some(wgpu::BlendState {
+                color: multiply,
+                alpha: wgpu::BlendComponent::REPLACE,
+            }),
+            write_mask: wgpu::ColorWrites::from_bits_truncate((k.write & 7) as u32),
+        }));
+    }
+    targets
 }
 
 /// The GPU-vertex shader module: the GS stages (draw.wgsl), the shared
@@ -793,18 +851,24 @@ impl Pipelines {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module,
-                    entry_point: Some(if clip_depth { "fs_gpu_nd" } else { "fs_gpu" }),
+                    entry_point: Some(if k.spatial_ui {
+                        if clip_depth {
+                            "fs_gpu_ui_nd"
+                        } else {
+                            "fs_gpu_ui"
+                        }
+                    } else if clip_depth {
+                        "fs_gpu_nd"
+                    } else {
+                        "fs_gpu"
+                    }),
                     // The lighting paths the draw can take; the others are
                     // compiled out (`LIT`, gpuvu.wgsl).
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: &[("LIT", lit as f64)],
                         ..Default::default()
                     },
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: COLOR_FORMAT,
-                        blend,
-                        write_mask: wgpu::ColorWrites::from_bits_truncate(k.write as u32),
-                    })],
+                    targets: &color_targets(k, blend),
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -849,13 +913,9 @@ impl Pipelines {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module,
-                    entry_point: Some("fs"),
+                    entry_point: Some(if k.spatial_ui { "fs_ui" } else { "fs" }),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: COLOR_FORMAT,
-                        blend,
-                        write_mask: wgpu::ColorWrites::from_bits_truncate(k.write as u32),
-                    })],
+                    targets: &color_targets(k, blend),
                 }),
                 multiview_mask: None,
                 cache: None,

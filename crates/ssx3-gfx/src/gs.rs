@@ -116,6 +116,8 @@ pub struct Cam {
 /// What produced a batch: the draw's material, HUD, a post pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tag {
+    /// Background artwork: tracked rotation, zero eye/head translation.
+    pub sky: bool,
     /// Source draw's projection record; VR reprojection is per draw.
     pub matrix: u16,
     /// Source draw index for the pixel probe (zero during normal rendering).

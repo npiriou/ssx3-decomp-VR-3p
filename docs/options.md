@@ -84,7 +84,9 @@ that gate.
 | `SSX3_VR_SKY_INTIMIDATOR_PANO=0` | Disable Intimidator's VR sky reconstruction (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_GRAVITUDE_PANO=0` | Disable Gravitude's VR sky reconstruction (enabled by default for its matched native sky sequence). |
 | `SSX3_VR_SKY_WRAP=1` | Enable the earlier experimental Ruthless Ridge sky-panel wrap for comparison; also set `SSX3_VR_SKY_RIDGE_PANO=0`. |
-| `SSX3_VR_SKY_TRACE_FROM=<frame>` | From this renderer frame onward, log the native sky texture sequence, the VR sky mode and the number of previously seen Snow Jam sectors restored after game-camera culling. |
+| `SSX3_VR_SKY_TRACE_FROM=<frame>` | From this renderer frame onward, log the native sky texture sequence, the VR sky mode and the sectors reconstructed from current-frame native inputs after game-camera culling. |
+| `SSX3_VR_SKY_ONLY=1` | Diagnostic: render only the backdrop in the world eyes. With `gfx_replay` and symmetric stereo projections, both background images must match pixel for pixel. |
+| `SSX3_VR_REPLAY_YAW=<degrees>` | Override the headset yaw in `gfx_replay`, including its `stereo` capture mode, to inspect any background direction. |
 | `SSX3_VR_TEST_YAW=<degrees>` | Offline headless visibility capture: simulate a fixed headset yaw when `SSX3_VR_VISIBILITY=1`. The VR executable supplies the live direction itself. |
 | `SSX3_VR_OFFLINE_STEREO=<degrees>` | Headless performance/capture mode: run the game with VR visibility and fixed-yaw stereo eyes, at `SSX3_VR_EYE_SIZE` pixels per eye (default 1920), without SteamVR. |
 | `SSX3_VR_INSPECT_DRAW=<index>` | With `gfx_replay`, log a frame draw's material, texture IDs and VU/DIRECT calls; use with `SSX3_GFX_PROBE=x,y` to trace a pixel back to its draw and GPU call. |

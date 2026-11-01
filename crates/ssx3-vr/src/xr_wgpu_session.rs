@@ -102,6 +102,16 @@ impl PanelPass {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
@@ -183,6 +193,7 @@ impl PanelPass {
         texture: &wgpu::Texture,
         sources: Option<[&wgpu::TextureView; 2]>,
         hud: &wgpu::TextureView,
+        transmission: &wgpu::TextureView,
         panel_eyes: [PanelEye; 2],
         panel: PanelConfig,
     ) {
@@ -222,6 +233,10 @@ impl PanelPass {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::TextureView(hud),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(transmission),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -301,6 +316,7 @@ impl OfflineStereoTarget {
         queue: &wgpu::Queue,
         sources: Option<[&wgpu::TextureView; 2]>,
         hud: &wgpu::TextureView,
+        transmission: &wgpu::TextureView,
         panel_eyes: [PanelEye; 2],
         panel: PanelConfig,
     ) -> Result<f64, Box<dyn Error>> {
@@ -314,6 +330,7 @@ impl OfflineStereoTarget {
             &self.texture,
             sources,
             hud,
+            transmission,
             panel_eyes,
             panel,
         );
@@ -336,6 +353,7 @@ impl OfflineStereoTarget {
         access: &Mutex<()>,
         sources: Option<[&wgpu::TextureView; 2]>,
         hud: &wgpu::TextureView,
+        transmission: &wgpu::TextureView,
         panel_eyes: [PanelEye; 2],
         panel: PanelConfig,
     ) -> Result<(f64, f64), Box<dyn Error>> {
@@ -349,6 +367,7 @@ impl OfflineStereoTarget {
             &self.texture,
             sources,
             hud,
+            transmission,
             panel_eyes,
             panel,
         );
@@ -618,6 +637,7 @@ impl StereoTarget {
         graphics: &WgpuXr,
         sources: Option<[&wgpu::TextureView; 2]>,
         hud: &wgpu::TextureView,
+        transmission: &wgpu::TextureView,
         panel_eyes: [PanelEye; 2],
         panel: PanelConfig,
     ) -> Result<BlitTiming, Box<dyn Error>> {
@@ -645,6 +665,7 @@ impl StereoTarget {
             texture,
             sources,
             hud,
+            transmission,
             panel_eyes,
             panel,
         );
@@ -675,6 +696,7 @@ impl StereoTarget {
         access: &Mutex<()>,
         sources: Option<[&wgpu::TextureView; 2]>,
         hud: &wgpu::TextureView,
+        transmission: &wgpu::TextureView,
         panel_eyes: [PanelEye; 2],
         panel: PanelConfig,
     ) -> Result<BlitTiming, Box<dyn Error>> {
@@ -708,6 +730,7 @@ impl StereoTarget {
             texture,
             sources,
             hud,
+            transmission,
             panel_eyes,
             panel,
         );

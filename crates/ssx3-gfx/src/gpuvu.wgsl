@@ -269,6 +269,7 @@ fn gs_vertex(c: u32, hc: vec4<f32>, cz: f32, adc: bool, col: vec4<f32>, stq: vec
         let game_clip = vec4<f32>(o.pos.xy, 2.0 * o.pos.z - o.pos.w, o.pos.w);
         let eye_clip = b.vr_reproject * game_clip;
         o.pos = vec4<f32>(eye_clip.xy, 0.5 * (eye_clip.w - eye_clip.z), eye_clip.w);
+        if (b.vr_mode == 2u) { o.pos.z = 0.0; }
     }
     o.zw = vec2<f32>(hc.z, w);
     o.zm = vec2<f32>(select(0.0, 1.0, xyzf), off.w);
@@ -446,4 +447,20 @@ fn gpu_fragment(v: VOut) -> FsOut {
     }
     o.depth = d;
     return o;
+}
+
+struct GpuUiOut {
+    @location(0) color: vec4<f32>,
+    @location(1) transmission: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+}
+@fragment
+fn fs_gpu_ui(v: VOut) -> GpuUiOut {
+    let gs = gpu_fragment(v);
+    return GpuUiOut(gs.color, ui_transmission(gs.color, v.pos.xy), gs.depth);
+}
+@fragment
+fn fs_gpu_ui_nd(v: VOut) -> UiOut {
+    let gs = gpu_fragment(v);
+    return UiOut(gs.color, ui_transmission(gs.color, v.pos.xy));
 }

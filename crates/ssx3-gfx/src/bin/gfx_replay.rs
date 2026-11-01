@@ -86,6 +86,11 @@ fn main() {
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(offset);
+        let yaw_degrees = std::env::var("SSX3_VR_REPLAY_YAW")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(yaw_degrees);
         let a = yaw_degrees.to_radians();
         let (s, c) = a.sin_cos();
         let mut view = ssx3_gfx::vr::IDENTITY;
@@ -550,7 +555,12 @@ fn main() {
                 "[vr-stereo] {differing}/{} pixels differ between the two rendered eyes",
                 left.2.len()
             );
-            if std::env::var("SSX3_VR_REPLAY_REFRESH").as_deref() != Ok("look-side") {
+            if std::env::var("SSX3_VR_SKY_ONLY").as_deref() == Ok("1") {
+                assert_eq!(
+                    differing, 0,
+                    "background art has finite-depth stereo disparity"
+                );
+            } else if std::env::var("SSX3_VR_REPLAY_REFRESH").as_deref() != Ok("look-side") {
                 assert!(
                     differing > left.2.len() / 100,
                     "eyes are effectively identical"

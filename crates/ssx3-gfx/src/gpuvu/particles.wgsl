@@ -18,14 +18,19 @@ fn ptc_centre(c: u32, cl: vec4<f32>, scale: u32, offset: u32) -> vec3<f32> {
 // One corner of the sprite with vertices `a` (first, ST `st.xy`) and `b`
 // (second, ST `st.zw`, the colour and Z), positions FTOI4 as the program's.
 // Culled sprites go outside the clip volume.
-fn ptc_corner(c: u32, corner: u32, a: vec3<f32>, b: vec3<f32>, st: vec4<f32>, rgba: vec4<i32>, visible: bool) -> VOut {
+fn ptc_corner(c: u32, corner: u32, a: vec3<f32>, b: vec3<f32>, st: vec4<f32>, rgba: vec4<i32>, visible: bool, clip: vec4<f32>) -> VOut {
     let xb = corner == 1u || corner == 2u;
     let yb = corner >= 2u;
     let p = trunc(vec3<f32>(select(a.x, b.x, xb), select(a.y, b.y, yb), b.z) * 16.0) / 16.0;
     let tc = vec2<f32>(select(st.x, st.z, xb), select(st.y, st.w, yb));
     let col = vec4<f32>(rgba & vec4<i32>(255));
     var o = gs_vertex(c, vec4<f32>(p, 1.0), 0.0, false, col, vec3<f32>(tc, 1.0));
-    if (!visible) {
+    if (vr_enabled()) {
+        // The desktop GS sprite uses W=1 and cz=0; GS depth is separate.
+        // Stereo must instead retain its real homogeneous clip depth/W.
+        o = gs_vertex(c, vec4<f32>(p * clip.w, clip.w), clip.z, false, col, vec3<f32>(tc, 1.0));
+    }
+    if (!visible && !vr_enabled()) {
         o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
     }
     return o;
@@ -71,7 +76,7 @@ fn mat4_particles_vertex(vi: u32, c: u32) -> VOut {
     let hi = centre + h;
     let rgba = vec4<i32>(vec4<f32>(col.xyz, col.w * fade));
     let st = vec4<f32>(fq(c, 8u).xy, fq(c, 9u).xy);
-    return ptc_corner(c, vi & 3u, select(lo, hi, ring), select(hi, lo, ring), st, rgba, ptc_inside(cl));
+    return ptc_corner(c, vi & 3u, select(lo, hi, ring), select(hi, lo, ring), st, rgba, ptc_inside(cl), cl);
 }
 
 // Glitter: q0-15 the patch coefficients, q16-19 M, q20 scale, q21 offset,
@@ -91,7 +96,7 @@ fn mat4_glitter_vertex(vi: u32, c: u32) -> VOut {
     let h = vec3<f32>(min(max(abs(fq(c, 22u).xy * (1.0 / cl.w)), vec2<f32>(lim.x)), vec2<f32>(lim.y)), 0.0);
     let centre = ptc_centre(c, cl, 20u, 21u);
     let rgba = vec4<i32>(bitcast<vec4<i32>>(uq(c, 23)).xyz, bitcast<i32>(data[base].w));
-    return ptc_corner(c, vi & 3u, centre + h, centre - h, vec4<f32>(0.0, 0.0, 1.0, 1.0), rgba, ptc_inside(cl));
+    return ptc_corner(c, vi & 3u, centre + h, centre - h, vec4<f32>(0.0, 0.0, 1.0, 1.0), rgba, ptc_inside(cl), cl);
 }
 
 // Snow: q0-3 M, q4 scale, q5 offset, q6 half size, q7 RGBA (ints), q8
@@ -117,7 +122,7 @@ fn mat5_snow_vertex(vi: u32, c: u32) -> VOut {
     let h = fq(c, 6u).xyz * (1.0 / cl.w);
     let centre = ptc_centre(c, cl, 4u, 5u);
     let st = vec4<f32>(fq(c, 9u).xy, fq(c, 10u).xy);
-    return ptc_corner(c, vi & 3u, centre + h, centre - h, st, rgba, fade || ptc_inside(cl));
+    return ptc_corner(c, vi & 3u, centre + h, centre - h, st, rgba, fade || ptc_inside(cl), cl);
 }
 
 @vertex

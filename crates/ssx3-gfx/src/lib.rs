@@ -32,6 +32,8 @@ mod shadow;
 mod terrain_vr;
 pub mod tex;
 pub mod vr;
+#[cfg(test)]
+mod vr_regression;
 
 pub use options::{Aa, Bloom, Options};
 pub use shadow::{set_debug_knob, DEBUG_KNOBS};
@@ -76,6 +78,7 @@ struct Targets {
     snapshot: wgpu::Texture,
     /// Copy of `depth` for the depth-fog pass.
     zsnap: wgpu::Texture,
+    transmission: Option<wgpu::Texture>,
 }
 
 /// An offscreen render target (`gs::Rt`) on the GPU.
@@ -110,8 +113,6 @@ pub struct Inner {
     gs: gs::Gs,
     terrain_geometry: terrain_vr::GeometryCache,
     mesh_geometry: mesh_vr::Cache,
-    /// Snow Jam sky sectors survive the original chase camera's culling.
-    snow_sky_calls: HashMap<u16, ssx3_render::gpu::GpuCall>,
     vu: Box<[u8; 16384]>,
     texcache: HashMap<tex::TexKey, CachedTex>,
     /// The terrain bake's textures blurred (real-time lighting, flag 32768).
@@ -204,6 +205,7 @@ pub struct Inner {
     vr_eye: Option<(usize, [[f32; 4]; 4])>,
     rendered_eyes: Option<[vr::Eye; 2]>,
     vr_reprojections: [Vec<Option<[[f32; 4]; 4]>>; 2],
+    vr_sky_reprojections: [Vec<Option<[[f32; 4]; 4]>>; 2],
     vr_ui: bool,
     vr_menu: bool,
     /// The latest published VR scene and its detached draw geometry.
@@ -239,6 +241,7 @@ struct RetainedVrScene {
 struct VrOutputSlot {
     world: [wgpu::Texture; 2],
     ui: wgpu::Texture,
+    transmission: wgpu::Texture,
     eye_size: (u32, u32),
 }
 
@@ -256,6 +259,7 @@ struct VrPublished {
 pub struct VrPresentation {
     pub world: Option<[(wgpu::TextureView, u32, u32); 2]>,
     pub ui: wgpu::TextureView,
+    pub transmission: wgpu::TextureView,
     pub eyes: Option<[vr::Eye; 2]>,
     pub serial: u64,
     pub age_ms: f64,
@@ -398,7 +402,6 @@ impl Renderer {
                 gs: gs::Gs::new(),
                 terrain_geometry: Default::default(),
                 mesh_geometry: Default::default(),
-                snow_sky_calls: HashMap::new(),
                 vu: Box::new([0; 16384]),
                 texcache: HashMap::new(),
                 bake_blur,
@@ -441,6 +444,7 @@ impl Renderer {
                 vr_eye: None,
                 rendered_eyes: None,
                 vr_reprojections: std::array::from_fn(|_| Vec::new()),
+                vr_sky_reprojections: std::array::from_fn(|_| Vec::new()),
                 vr_ui: false,
                 vr_menu: false,
                 vr_last_scene: None,
@@ -542,12 +546,17 @@ impl Renderer {
             .ui_slot
             .ui
             .create_view(&wgpu::TextureViewDescriptor {
-                format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+                // UI RGB and transmittance compose in the original GS encoded space.
+                format: Some(wgpu::TextureFormat::Rgba8Unorm),
                 ..Default::default()
             });
         Some(VrPresentation {
             world,
             ui,
+            transmission: published
+                .ui_slot
+                .transmission
+                .create_view(&Default::default()),
             eyes: published.eyes,
             serial: published.serial,
             age_ms: published.at.elapsed().as_secs_f64() * 1000.0,
@@ -613,7 +622,7 @@ impl Renderer {
     pub fn present_vr_ui_view(&self) -> Option<wgpu::TextureView> {
         let g = self.1.ui_present.lock().unwrap();
         Some(g.as_ref()?.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
             ..Default::default()
         }))
     }
@@ -1111,7 +1120,7 @@ impl Inner {
             .find(|slot| slot.eye_size == eye_size && Arc::strong_count(slot) == 1)
             .cloned()
             .unwrap_or_else(|| {
-                let texture = |label, (w, h)| {
+                let texture = |label, (w, h), format| {
                     self.dev.create_texture(&wgpu::TextureDescriptor {
                         label: Some(label),
                         size: wgpu::Extent3d {
@@ -1122,16 +1131,27 @@ impl Inner {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format,
                         usage: wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::COPY_DST
                             | wgpu::TextureUsages::COPY_SRC,
-                        view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+                        view_formats: if format == wgpu::TextureFormat::Rgba8Unorm {
+                            &[wgpu::TextureFormat::Rgba8UnormSrgb]
+                        } else {
+                            &[]
+                        },
                     })
                 };
                 let slot = Arc::new(VrOutputSlot {
-                    world: std::array::from_fn(|_| texture("ssx3-gfx VR eye present", eye_size)),
-                    ui: texture("ssx3-gfx VR UI present", (1024, 1024)),
+                    world: std::array::from_fn(|_| {
+                        texture("ssx3-gfx VR eye present", eye_size, draw::COLOR_FORMAT)
+                    }),
+                    ui: texture("ssx3-gfx VR UI present", (1024, 1024), draw::COLOR_FORMAT),
+                    transmission: texture(
+                        "ssx3-gfx VR UI transmission",
+                        (1024, 1024),
+                        wgpu::TextureFormat::Rgba16Float,
+                    ),
                     eye_size,
                 });
                 self.vr_output_slots.push(slot.clone());
@@ -1228,6 +1248,13 @@ impl Inner {
             depth,
             snapshot,
             zsnap,
+            transmission: self.vr_ui.then(|| {
+                mk(
+                    "ssx3-gfx UI transmission",
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::TextureUsages::COPY_SRC,
+                )
+            }),
         });
     }
 
@@ -1603,7 +1630,6 @@ impl Inner {
             gs: std::mem::take(&mut self.gs),
             terrain_geometry: std::mem::take(&mut self.terrain_geometry),
             mesh_geometry: std::mem::take(&mut self.mesh_geometry),
-            snow_sky_calls: std::mem::take(&mut self.snow_sky_calls),
             vu: std::mem::replace(&mut self.vu, Box::new([0; 16384])),
             stats: self.stats,
             phase1_end: self.phase1_end,
@@ -1618,7 +1644,6 @@ impl Inner {
         self.gs = b.gs;
         self.terrain_geometry = b.terrain_geometry;
         self.mesh_geometry = b.mesh_geometry;
-        self.snow_sky_calls = b.snow_sky_calls;
         self.vu = b.vu;
         self.stats = b.stats;
         self.phase1_end = b.phase1_end;
@@ -1676,11 +1701,12 @@ impl Inner {
         // geometry belongs to this prepared scene and is shared by its eyes.
         // The last perspective record is the active scene projection. The
         // first one may use a shorter near plane for sky/background draws.
+        let course_scene = geometry.batches.iter().any(|batch| batch.tag.terrain);
         let source = built
             .frame
             .matrices
             .iter()
-            .filter(|m| m.view_proj[2][3].abs() > 0.5)
+            .filter(|m| course_scene && m.view_proj[2][3].abs() > 0.5)
             .last();
         if eyes.is_some() {
             let (w, h) = geometry.state.size;
@@ -1699,6 +1725,14 @@ impl Inner {
                     .matrices
                     .iter()
                     .map(|m| vr::reproject(eye, m.view_proj))
+                    .collect()
+            });
+            self.vr_sky_reprojections = eyes.map(|eye| {
+                built
+                    .frame
+                    .matrices
+                    .iter()
+                    .map(|m| vr::sky_reproject(eye, m.view_proj))
                     .collect()
             });
             if let (Some(left), Some(right)) = (
@@ -1793,6 +1827,16 @@ impl Inner {
                     .matrices
                     .iter()
                     .map(|m| vr::reproject(eye, m.view_proj))
+                    .collect()
+            });
+            self.vr_sky_reprojections = eyes.map(|eye| {
+                scene
+                    .published
+                    .built
+                    .frame
+                    .matrices
+                    .iter()
+                    .map(|m| vr::sky_reproject(eye, m.view_proj))
                     .collect()
             });
             for (index, matrix) in fallback.into_iter().enumerate() {
@@ -2202,6 +2246,8 @@ impl Inner {
             .ok()
             .is_some_and(|v| v == "all" || v.parse::<u64>().ok() == Some(self.stats.frames));
         let vr_snapshot_bounds = std::env::var("SSX3_VR_SNAPSHOT_BOUNDS").as_deref() != Ok("0");
+        let sky_only =
+            self.vr_eye.is_some() && std::env::var("SSX3_VR_SKY_ONLY").as_deref() == Ok("1");
         let skip_test = &dbg.skip_test;
         // Debug: SSX3_GFX_PROBE=x,y prints that main-target pixel after every
         // item that changes it (on the SSX3_GFX_TRACE frame, if set).
@@ -2213,6 +2259,9 @@ impl Inner {
         let time = self.t0.elapsed().as_secs_f32();
         for (bi, b) in batches.iter().enumerate() {
             let st = &b.state;
+            if sky_only && !b.tag.sky && !b.tag.screen {
+                continue;
+            }
             if st.target == scene.main_fbp {
                 if self.vr_ui && !self.vr_menu && !b.tag.hud || self.vr_eye.is_some() && b.tag.hud {
                     continue;
@@ -2419,7 +2468,12 @@ impl Inner {
                 && b.tag.post.is_none();
             let reprojection = if vr_world {
                 self.vr_eye.map(|(eye, fallback)| {
-                    self.vr_reprojections[eye]
+                    let matrices = if b.tag.sky {
+                        &self.vr_sky_reprojections
+                    } else {
+                        &self.vr_reprojections
+                    };
+                    matrices[eye]
                         .get(b.tag.matrix as usize)
                         .and_then(|m| *m)
                         .unwrap_or(fallback)
@@ -2529,6 +2583,13 @@ impl Inner {
                 continue;
             }
             for mut p in draw::plans(st, (tw, th), rt_psm, as_max) {
+                if self.vr_ui && st.target == scene.main_fbp {
+                    draw::spatial_ui(&mut p);
+                }
+                if vr_world && b.tag.sky {
+                    p.key.depth = wgpu::CompareFunction::Always;
+                    p.key.depth_write = false;
+                }
                 if no_zw {
                     p.key.depth_write = false;
                 }
@@ -2656,7 +2717,14 @@ impl Inner {
                         ubytes.extend_from_slice(&value.to_le_bytes());
                     }
                 }
-                ubytes.extend_from_slice(&(reprojection.is_some() as u32).to_le_bytes());
+                let vr_mode: u32 = if reprojection.is_none() {
+                    0
+                } else if b.tag.sky {
+                    2
+                } else {
+                    1
+                };
+                ubytes.extend_from_slice(&vr_mode.to_le_bytes());
                 ubytes.extend_from_slice(&[0u8; 12]);
                 ubytes.resize(
                     ubytes.len().next_multiple_of(draw::UNIFORM_STRIDE as usize),
@@ -2685,7 +2753,7 @@ impl Inner {
                     gpu: b.gpu,
                     desc,
                     frame: st.tex == Some(gs::FRAME_TEX),
-                    date,
+                    date: date || (p.key.spatial_ui && matches!((p.u.flags >> 20) & 7, 4 | 5)),
                     zfog,
                     target: st.target,
                     key: p.key,
@@ -2997,6 +3065,10 @@ impl Inner {
         let mut copied = 0u64;
         // A pass on target `fbp`; depth starts cleared on a target's first
         // pass of the frame.
+        let transmission_view = t
+            .transmission
+            .as_ref()
+            .map(|tex| tex.create_view(&Default::default()));
         let vr_ui = self.vr_ui;
         let vr_frame = self.vr_eye.is_some() || vr_ui;
         let begin =
@@ -3010,25 +3082,41 @@ impl Inner {
                         r.depth.create_view(&Default::default()),
                     )
                 };
-                enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("ssx3-gfx frame"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &c,
+                let mut attachments = vec![Some(wgpu::RenderPassColorAttachment {
+                    view: &c,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // (The lighting fit's views start from black:
+                        // they draw the terrain only.)
+                        load: if first && fbp == main && vr_ui {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else if first && fbp == main && (shadow::fitting_view() || vr_frame) {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
+                if vr_ui && fbp == main {
+                    attachments.push(Some(wgpu::RenderPassColorAttachment {
+                        view: transmission_view.as_ref().unwrap(),
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            // (The lighting fit's views start from black:
-                            // they draw the terrain only.)
-                            load: if first && fbp == main && vr_ui {
-                                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                            } else if first && fbp == main && (shadow::fitting_view() || vr_frame) {
-                                wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                            load: if first {
+                                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
                             } else {
                                 wgpu::LoadOp::Load
                             },
                             store: wgpu::StoreOp::Store,
                         },
-                    })],
+                    }));
+                }
+                enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ssx3-gfx frame"),
+                    color_attachments: &attachments,
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &d,
                         // Each frame starts with depth cleared to the farthest
@@ -3467,6 +3555,21 @@ impl Inner {
                 depth_or_array_layers: 1,
             },
         );
+        if self.vr_ui {
+            enc.copy_texture_to_texture(
+                t.transmission.as_ref().unwrap().as_image_copy(),
+                self.vr_ui_slot
+                    .as_ref()
+                    .unwrap()
+                    .transmission
+                    .as_image_copy(),
+                wgpu::Extent3d {
+                    width: t.w,
+                    height: t.h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         // Depth after phase 1, read back for the light queries.
         let t_buf = web_time::Instant::now();
         let depth_buf = gather.as_ref().map(|g| {
@@ -3881,7 +3984,6 @@ struct Build {
     gs: gs::Gs,
     terrain_geometry: terrain_vr::GeometryCache,
     mesh_geometry: mesh_vr::Cache,
-    snow_sky_calls: HashMap<u16, ssx3_render::gpu::GpuCall>,
     vu: Box<[u8; 16384]>,
     stats: Stats,
     phase1_end: usize,
@@ -3922,7 +4024,11 @@ impl Build {
             }
         }
         let draws: Vec<&frame::Draw> = fr.draws().collect();
+        let course_scene = fr
+            .draws()
+            .any(|d| matches!(d.state.material, Material::Bezier1 | Material::Bezier2));
         let vr_sky_dome = vr_active
+            && course_scene
             && std::env::var("SSX3_VR_SKY_FILL").map_or(true, |v| v != "0")
             && draws.first().is_some_and(|d| {
                 d.matrix == 0 && d.state.material == Material::General && d.state.layer == 0
@@ -4033,70 +4139,35 @@ impl Build {
         // The game culls Snow Jam sky sectors as the chase camera moves.
         // Match the ordered subset of its own texture sequence so the VR
         // backdrop does not switch to near-field native panels mid-race.
-        const SNOW_SKY_TEXTURES: [u16; 9] = [281, 289, 288, 287, 282, 286, 285, 284, 283];
-        let mut snow_sky_seen = std::collections::HashSet::new();
-        let mut snow_next = 0;
-        let supported_panorama_sky = sky_draws >= 5
-            && draws[0].tex[0] == Some(SNOW_SKY_TEXTURES[0])
-            && draws[..sky_draws].iter().all(|draw| {
-                let Some(next) = SNOW_SKY_TEXTURES[snow_next..]
-                    .iter()
-                    .position(|&texture| draw.tex[0] == Some(texture))
-                else {
-                    return false;
-                };
-                snow_next += next + 1;
-                true
-            });
-        let panorama_sky = vr_sky_dome
-            && supported_panorama_sky
-            && std::env::var("SSX3_VR_SKY_PANORAMA").map_or(true, |v| v != "0");
+        let sky_textures: Vec<_> = draws[..sky_draws].iter().map(|d| d.tex[0]).collect();
+        let sky_layout = ssx3_render::sky::Layout::detect(&sky_textures);
+        let mut sky_seen = std::collections::HashSet::new();
+        let mut sky_sources = Vec::new();
+        let mut sky_panels = Vec::new();
+        let palette_is = |base| sky_layout.is_some_and(|layout| layout.base == base);
+        let panorama_sky =
+            palette_is(281) && std::env::var("SSX3_VR_SKY_PANORAMA").as_deref() != Ok("0");
         let snow_native_panels =
             panorama_sky && std::env::var("SSX3_VR_SKY_SNOW_NATIVE").as_deref() != Ok("0");
-        if !snow_native_panels {
-            b.snow_sky_calls.clear();
-        }
         let clean_snow_polar =
-            panorama_sky && std::env::var("SSX3_VR_SKY_POLAR_CLEAN").map_or(true, |v| v != "0");
-        let supported_ridge_sky = vr_sky_dome
-            && sky_draws >= 7
-            && [508, 516, 515, 514, 509, 513, 512]
-                .into_iter()
-                .enumerate()
-                .all(|(n, texture)| draws[n].tex[0] == Some(texture));
-        let ridge_panorama = supported_ridge_sky
-            && std::env::var("SSX3_VR_SKY_RIDGE_PANO").map_or(true, |v| v != "0");
-        let city_panorama = vr_sky_dome
-            && sky_draws >= 7
-            && [420, 428, 427, 426, 421]
-                .into_iter()
-                .enumerate()
-                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
-            // Course visibility can omit the last city panel; the remaining
-            // panels still use the same native mesh and UV layout.
-            && (sky_draws == 7
-                && [draws[5].tex[0], draws[6].tex[0]] == [Some(425), Some(423)]
-                || sky_draws >= 8
-                    && matches!(
-                        [draws[5].tex[0], draws[6].tex[0], draws[7].tex[0]],
-                        [Some(425), Some(423), Some(422)]
-                            | [Some(425), Some(424), Some(423)]
-                    ))
-            && std::env::var("SSX3_VR_SKY_CITY_PANO").map_or(true, |v| v != "0");
-        let intimidator_panorama = vr_sky_dome
-            && sky_draws >= 8
-            && [630, 638, 637, 636, 631, 635, 633, 632]
-                .into_iter()
-                .enumerate()
-                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
-            && std::env::var("SSX3_VR_SKY_INTIMIDATOR_PANO").map_or(true, |v| v != "0");
-        let gravitude_panorama = vr_sky_dome
-            && sky_draws >= 8
-            && [766, 774, 773, 772, 767, 771, 770, 768]
-                .into_iter()
-                .enumerate()
-                .all(|(n, texture)| draws[n].tex[0] == Some(texture))
-            && std::env::var("SSX3_VR_SKY_GRAVITUDE_PANO").map_or(true, |v| v != "0");
+            panorama_sky && std::env::var("SSX3_VR_SKY_POLAR_CLEAN").as_deref() != Ok("0");
+        let supported_ridge_sky = palette_is(508);
+        let ridge_panorama =
+            supported_ridge_sky && std::env::var("SSX3_VR_SKY_RIDGE_PANO").as_deref() != Ok("0");
+        let city_panorama =
+            palette_is(420) && std::env::var("SSX3_VR_SKY_CITY_PANO").as_deref() != Ok("0");
+        let intimidator_panorama =
+            palette_is(630) && std::env::var("SSX3_VR_SKY_INTIMIDATOR_PANO").as_deref() != Ok("0");
+        let gravitude_panorama =
+            palette_is(766) && std::env::var("SSX3_VR_SKY_GRAVITUDE_PANO").as_deref() != Ok("0");
+        let generic_panorama =
+            sky_layout.is_some_and(|layout| !matches!(layout.base, 281 | 420 | 508 | 630 | 766));
+        let native_panorama = snow_native_panels
+            || ridge_panorama
+            || city_panorama
+            || intimidator_panorama
+            || gravitude_panorama
+            || generic_panorama;
         let wrapped_sky = supported_ridge_sky
             && !ridge_panorama
             && std::env::var("SSX3_VR_SKY_WRAP").is_ok_and(|v| v == "1");
@@ -4106,6 +4177,7 @@ impl Build {
             || city_panorama
             || intimidator_panorama
             || gravitude_panorama
+            || generic_panorama
             || wrapped_sky
             || sphere_sky;
         let sky_last = vr_sky_dome
@@ -4226,6 +4298,7 @@ impl Build {
                 // The batches' tag: the draw's material (none between draws).
                 let m = n.and_then(|n| draws.get(n)).map(|d| d.state.material);
                 b.gs.tag = gs::Tag {
+                    sky: vr_sky_dome && n.is_some_and(|index| index < sky_draws),
                     matrix: n.and_then(|n| draws.get(n)).map_or(0, |d| d.matrix as u16),
                     probe_draw: n.filter(|_| dbg.probe.is_some()).map_or(0, |n| n as u16),
                     terrain: matches!(m, Some(Material::Bezier1 | Material::Bezier2)),
@@ -4433,11 +4506,7 @@ impl Build {
                                         }
                                         continue;
                                     }
-                                    if (panorama_sky
-                                        || ridge_panorama
-                                        || city_panorama
-                                        || intimidator_panorama
-                                        || gravitude_panorama)
+                                    if (panorama_sky || native_panorama)
                                         && matches!(owner, Owner::Payload(n) if *n > 0 && *n < sky_draws)
                                     {
                                         let xy = b.gs.ctx[0].xyoffset;
@@ -4451,48 +4520,39 @@ impl Build {
                                                 built.frame.matrices.get(draw.matrix as usize)
                                             })
                                             .and_then(|matrix| {
-                                                if snow_native_panels
-                                                    || ridge_panorama
-                                                    || city_panorama
-                                                    || intimidator_panorama
-                                                    || gravitude_panorama
-                                                {
-                                                    vr::sky_native_panorama_panels(
+                                                if native_panorama {
+                                                    vr::native_sky_panorama_panels(
                                                         &c,
                                                         matrix.view_proj,
                                                         xyoffset,
                                                         b.gs.size,
-                                                        !(snow_native_panels || gravitude_panorama),
-                                                        gravitude_panorama
-                                                            && std::env::var(
-                                                                "SSX3_VR_SKY_GRAVITUDE_SMOOTH",
-                                                            )
-                                                            .as_deref()
-                                                                != Ok("0"),
-                                                        gravitude_panorama
-                                                            && std::env::var(
-                                                                "SSX3_VR_SKY_GRAVITUDE_HORIZON",
-                                                            )
-                                                            .as_deref()
-                                                                != Ok("0"),
-                                                        !snow_native_panels,
+                                                        draws[n?].tex[0]?,
+                                                        sky_layout?,
                                                     )
                                                 } else {
                                                     vr::sky_panorama_panels(&c, matrix.view_proj)
                                                 }
                                             });
                                         if let Some(panels) = panels {
-                                            if snow_native_panels {
+                                            if native_panorama {
                                                 if let Some(texture) =
                                                     n.and_then(|n| draws[n].tex[0])
                                                 {
-                                                    snow_sky_seen.insert(texture);
-                                                    b.snow_sky_calls.insert(texture, c.clone());
+                                                    sky_seen.insert(texture);
+                                                    sky_sources.push((texture, c.clone()));
                                                 }
                                             }
                                             for panel in panels {
                                                 let first = b.gs.batches.len();
+                                                let data_start = b.gs.gpu.data.len();
                                                 b.gs.gpu_draw(panel);
+                                                if let Some(angles) = vr::sky_sector_angles(&c) {
+                                                    sky_panels.push(vr::SkyPanel {
+                                                        data_start,
+                                                        angles,
+                                                        upper: c.data.len() == 24,
+                                                    });
+                                                }
                                                 for batch in &mut b.gs.batches[first..] {
                                                     if batch.gpu.is_some() {
                                                         batch.state.prim |= 1 << 6;
@@ -4502,8 +4562,10 @@ impl Build {
                                                     }
                                                 }
                                             }
-                                        } else if !c.pre.is_empty() {
-                                            b.gs.gif(&c.pre);
+                                        } else {
+                                            // Keep unrecognized native artwork. Its sky tag still
+                                            // guarantees rotation-only stereo at infinite depth.
+                                            b.gs.gpu_draw(c);
                                         }
                                         continue;
                                     }
@@ -4602,6 +4664,8 @@ impl Build {
                             "intimidator"
                         } else if gravitude_panorama {
                             "gravitude"
+                        } else if generic_panorama {
+                            "native-palette"
                         } else if wrapped_sky {
                             "wrapped-ridge"
                         } else if sphere_sky {
@@ -4623,6 +4687,7 @@ impl Build {
                         || city_panorama
                         || intimidator_panorama
                         || gravitude_panorama
+                        || generic_panorama
                         || wrapped_sky
                     {
                         let sphere = vr::sky_dome_background(&sky_dome_calls, clean_snow_polar);
@@ -4668,42 +4733,54 @@ impl Build {
                     }
                     sky_dome_calls.clear();
                 }
-                if Some(i) == sky_end && snow_native_panels {
-                    // The original chase camera culls sky sectors outside
-                    // its view. Rebuild those seen earlier for a turned eye.
+                if Some(i) == sky_end && native_panorama {
+                    // Reconstruct culled sectors from this frame's own native
+                    // sky inputs; never reuse a different frame's material state.
                     if let Some(matrix) = built.frame.matrices.first() {
                         let xy = b.gs.ctx[0].xyoffset;
                         let xyoffset = [
                             (xy & 0xffff) as f32 / 16.0,
                             ((xy >> 32) & 0xffff) as f32 / 16.0,
                         ];
-                        let missing: Vec<_> = SNOW_SKY_TEXTURES[1..]
+                        let missing: Vec<_> = sky_layout.unwrap().textures()[1..]
                             .iter()
-                            .filter(|texture| !snow_sky_seen.contains(texture))
-                            .filter_map(|texture| b.snow_sky_calls.get(texture).cloned())
+                            .filter(|texture| !sky_seen.contains(texture))
+                            .filter_map(|texture| {
+                                vr::missing_sky_sector(&sky_sources, *texture, sky_layout.unwrap())
+                                    .map(|source| (*texture, source))
+                            })
                             .collect();
                         if sky_trace && !missing.is_empty() {
                             eprintln!(
-                                "[vr-sky] restored {} culled Snow Jam sectors",
+                                "[vr-sky] restored {} culled native sky sectors",
                                 missing.len()
                             );
                         }
-                        for source in missing {
-                            if let Some(panels) = vr::sky_native_panorama_panels(
+                        for (texture, source) in missing {
+                            if let Some(panels) = vr::native_sky_panorama_panels(
                                 &source,
                                 matrix.view_proj,
                                 xyoffset,
                                 b.gs.size,
-                                false,
-                                false,
-                                false,
-                                false,
+                                texture,
+                                sky_layout.unwrap(),
                             ) {
                                 for panel in panels {
                                     let first = b.gs.batches.len();
+                                    let data_start = b.gs.gpu.data.len();
                                     b.gs.gpu_draw(panel);
+                                    if let Some(angles) = vr::sky_sector_angles(&source) {
+                                        sky_panels.push(vr::SkyPanel {
+                                            data_start,
+                                            angles,
+                                            upper: source.data.len() == 24,
+                                        });
+                                    }
                                     for batch in &mut b.gs.batches[first..] {
                                         if batch.gpu.is_some() {
+                                            let info = tex::info(mem, texman, texture);
+                                            batch.state.tex = Some(info);
+                                            batch.state.ctx.tex0 = tex::tex0(mem, info);
                                             batch.state.prim |= 1 << 6;
                                             batch.state.ctx.alpha = 0x44;
                                             batch.state.ctx.test &= !1;
@@ -4716,6 +4793,7 @@ impl Build {
                     }
                 }
             }
+            vr::stitch_sky_panels(&mut b.gs.gpu.data, &sky_panels);
             if !phase2_started {
                 b.phase1_end = b.gs.batches.len();
                 if mode & 2 != 0 {

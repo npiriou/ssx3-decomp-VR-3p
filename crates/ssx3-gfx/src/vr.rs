@@ -68,6 +68,105 @@ pub fn reproject(eye: Eye, game_projection: [[f32; 4]; 4]) -> Option<[[f32; 4]; 
     ))
 }
 
+/// Background art is at infinity: retain orientation and each eye's FOV,
+/// while removing the finite-depth disparity of the game's tiny sky mesh.
+pub fn sky_reproject(mut eye: Eye, game_projection: [[f32; 4]; 4]) -> Option<[[f32; 4]; 4]> {
+    eye.view_from_game[3][..3].fill(0.0);
+    reproject(eye, game_projection)
+}
+
+/// Native horizon edges identify a mesh instance, even when several share
+/// a texture. Artwork emission order is not angular order.
+pub fn sky_sector_angles(call: &ssx3_render::gpu::GpuCall) -> Option<[f32; 2]> {
+    let mut edges = [None, None];
+    for v in call.data.chunks_exact(4) {
+        let p = v[0].map(|x| x as i32 as f32 / 32768.0);
+        if !(-0.40..=-0.38).contains(&p[2]) || p[0].hypot(p[1]) < 0.6 {
+            continue;
+        }
+        if v[1][0] == 4096 {
+            edges[0] = Some(p[1].atan2(p[0]));
+        }
+        if v[1][0] == 0 {
+            edges[1] = Some(p[1].atan2(p[0]));
+        }
+    }
+    Some([edges[0]?, edges[1]?])
+}
+
+fn angle_distance(a: f32, b: f32) -> f32 {
+    ((a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI).abs()
+}
+
+/// Orient a culled upper strip with its actual lower partner. The fourth
+/// native panel may precede or follow the other three, depending on the sky.
+pub fn missing_sky_sector(
+    sources: &[(u16, ssx3_render::gpu::GpuCall)],
+    texture: u16,
+    layout: ssx3_render::sky::Layout,
+) -> Option<ssx3_render::gpu::GpuCall> {
+    let (slot, upper) = layout.sector(texture)?;
+    let anchor = sources.iter().find_map(|(id, call)| {
+        if layout.sector(*id)?.0 != 0 {
+            return None;
+        }
+        sky_sector_angles(call).map(|a| a[0])
+    });
+    let expected = anchor.map(|start| start + slot as f32 * std::f32::consts::FRAC_PI_4);
+    let paired = sources
+        .iter()
+        .filter(|(id, call)| {
+            layout.sector(*id) == Some((slot, !upper)) && sky_sector_angles(call).is_some()
+        })
+        .min_by(|a, b| {
+            let error = |entry: &(u16, ssx3_render::gpu::GpuCall)| {
+                expected.map_or(0.0, |angle| {
+                    angle_distance(sky_sector_angles(&entry.1).unwrap()[0], angle)
+                })
+            };
+            error(a).total_cmp(&error(b))
+        });
+    let (source_texture, source) = paired.or_else(|| sources.last())?;
+    native_sky_sector(source, *source_texture, texture, layout)
+}
+
+#[derive(Clone, Copy)]
+pub struct SkyPanel {
+    pub data_start: usize,
+    pub angles: [f32; 2],
+    pub upper: bool,
+}
+
+/// Join actual neighbouring instances opaquely and fade only open edges.
+/// Each reconstructed panel has 17 rows, 9 columns, 4 qwords per vertex.
+pub fn stitch_sky_panels(data: &mut [[u32; 4]], panels: &[SkyPanel]) {
+    for panel in panels {
+        let open_start = !panels.iter().any(|other| {
+            other.upper == panel.upper && angle_distance(other.angles[1], panel.angles[0]) < 0.01
+        });
+        let open_end = !panels.iter().any(|other| {
+            other.upper == panel.upper && angle_distance(other.angles[0], panel.angles[1]) < 0.01
+        });
+        for row in 0..=16 {
+            let t = row as f32 / 16.;
+            let vertical = if panel.upper {
+                (t / 0.125).clamp(0., 1.)
+            } else {
+                ((1. - t) / 0.25).clamp(0., 1.)
+            };
+            for col in 0..=8 {
+                let s = col as f32 / 8.;
+                let edge = (if open_start { s / 0.5 } else { 1. })
+                    .min(if open_end { (1. - s) / 0.5 } else { 1. })
+                    .clamp(0., 1.);
+                if let Some(color) = data.get_mut(panel.data_start + (row * 9 + col) * 4 + 2) {
+                    color[3] = (128. * vertical * edge).round() as u32;
+                }
+            }
+        }
+    }
+}
+
 /// VU1 omits static mesh inputs on later frames once the GS arena holds
 /// them. VR sky reconstruction still needs the original vertices, so recover
 /// a whole cached Mat3 mesh before remapping it around the tracked view.
@@ -100,6 +199,85 @@ pub fn restore_cached_sky_mesh(
     };
     call.data.extend_from_slice(data);
     true
+}
+
+/// A culled sector keeps its artwork but must follow this frame's sky
+/// transform. Mixing old and current screen matrices splits shared edges.
+pub fn rebase_cached_sky_panel(
+    cached: &mut ssx3_render::gpu::GpuCall,
+    current: &ssx3_render::gpu::GpuCall,
+) {
+    cached.uniforms[..4].copy_from_slice(&current.uniforms[..4]);
+    cached.uniforms[18] = current.uniforms[18];
+}
+
+/// Reconstruct an unseen Snow Jam sector from its native 45-degree layout.
+/// Texture IDs are the original paired lower/upper artwork, never a repeated
+/// neighbouring image. The caller selects that texture on the resulting batch.
+pub fn snow_sky_sector(
+    template: &ssx3_render::gpu::GpuCall,
+    template_texture: u16,
+    texture: u16,
+) -> Option<ssx3_render::gpu::GpuCall> {
+    native_sky_sector(
+        template,
+        template_texture,
+        texture,
+        ssx3_render::sky::Layout { base: 281 },
+    )
+}
+
+pub fn native_sky_sector(
+    template: &ssx3_render::gpu::GpuCall,
+    template_texture: u16,
+    texture: u16,
+    layout: ssx3_render::sky::Layout,
+) -> Option<ssx3_render::gpu::GpuCall> {
+    use ssx3_render::gpu::{Link, Program};
+    let (index, upper) = layout.sector(texture)?;
+    let (source_index, _) = layout.sector(template_texture)?;
+    if template.program != Program::Mat3Mesh {
+        return None;
+    }
+    let start = template.data.chunks_exact(4).find_map(|v| {
+        let p = v[0].map(|x| x as i32 as f32 / 32768.0);
+        (v[1][0] == 4096 && (-0.40..=-0.38).contains(&p[2])).then(|| p[1].atan2(p[0]))
+    })? + ((index as i32 - source_index as i32) as f32 * 45.0).to_radians();
+    let vertex = template.data.chunks_exact(4).next()?;
+    let mut out = template.clone();
+    out.link = Link::None;
+    out.split = None;
+    out.mesh_key = None;
+    out.data.clear();
+    out.indices.clear();
+    out.index_mode = 0;
+    // Only the sector's angular limits enter sky_native_panorama_panels;
+    // it reconstructs the native lower rings and upper strips consistently.
+    for col in 0..3 {
+        let angle = start + (col as f32 * 22.5).to_radians();
+        let (sn, co) = angle.sin_cos();
+        for (z, v) in if upper {
+            [(-0.3923645, 4096), (0.3923645, 0)]
+        } else {
+            [(-0.3923645, 0), (-0.75457764, 2048)]
+        } {
+            let mut record = [vertex[0], vertex[1], vertex[2], vertex[3]];
+            record[0] = [0.6340332 * co, 0.6340332 * sn, z, 0.0]
+                .map(|p| ((p * 32768.0).round() as i32) as u32);
+            record[1][0] = 4096 - col * 2048;
+            record[1][1] = v;
+            out.data.extend(record);
+        }
+    }
+    if !upper {
+        // The lower-sector discriminator is 15/16 native vertices.
+        let first = out.data[..4].to_vec();
+        while out.data.len() < 16 * 4 {
+            out.data.extend_from_slice(&first);
+        }
+    }
+    out.uniforms[4][1] = (out.data.len() / 4) as u32;
+    Some(out)
 }
 
 /// Extend the original sky's blue dome below its artist-authored horizon.
@@ -471,6 +649,71 @@ pub fn sky_native_panorama_panels(
     blend_gravitude_horizon: bool,
     fade_all_side_edges: bool,
 ) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
+    sky_native_panorama_panels_impl(
+        call,
+        game_projection,
+        xyoffset,
+        gs_size,
+        fade_upper_edge,
+        join_gravitude_upper,
+        blend_gravitude_horizon,
+        fade_all_side_edges,
+        None,
+    )
+}
+
+/// The outer panorama edges follow the artwork's sector index, not a fixed
+/// world angle: different native sky meshes rotate this four-sector layout.
+pub fn snow_sky_panorama_panels(
+    call: &ssx3_render::gpu::GpuCall,
+    game_projection: [[f32; 4]; 4],
+    xyoffset: [f32; 2],
+    gs_size: (u32, u32),
+    texture: u16,
+) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
+    native_sky_panorama_panels(
+        call,
+        game_projection,
+        xyoffset,
+        gs_size,
+        texture,
+        ssx3_render::sky::Layout { base: 281 },
+    )
+}
+
+pub fn native_sky_panorama_panels(
+    call: &ssx3_render::gpu::GpuCall,
+    game_projection: [[f32; 4]; 4],
+    xyoffset: [f32; 2],
+    gs_size: (u32, u32),
+    texture: u16,
+    layout: ssx3_render::sky::Layout,
+) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
+    let (sector, _) = layout.sector(texture)?;
+    sky_native_panorama_panels_impl(
+        call,
+        game_projection,
+        xyoffset,
+        gs_size,
+        false,
+        false,
+        false,
+        false,
+        Some(sector),
+    )
+}
+
+fn sky_native_panorama_panels_impl(
+    call: &ssx3_render::gpu::GpuCall,
+    game_projection: [[f32; 4]; 4],
+    xyoffset: [f32; 2],
+    gs_size: (u32, u32),
+    fade_upper_edge: bool,
+    join_gravitude_upper: bool,
+    blend_gravitude_horizon: bool,
+    fade_all_side_edges: bool,
+    snow_sector: Option<usize>,
+) -> Option<Vec<ssx3_render::gpu::GpuCall>> {
     use ssx3_render::gpu::{Link, Program};
     if call.program != Program::Mat3Mesh
         || call.uniforms[4][0] != 0
@@ -531,12 +774,16 @@ pub fn sky_native_panorama_panels(
     let wrap_angle = |angle: f32| {
         (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
     };
-    let fade_start = if fade_all_side_edges {
+    let fade_start = if let Some(sector) = snow_sector {
+        sector == 0
+    } else if fade_all_side_edges {
         !keep_start
     } else {
         wrap_angle(start - std::f32::consts::FRAC_PI_2).abs() < 0.02
     };
-    let fade_end = if fade_all_side_edges {
+    let fade_end = if let Some(sector) = snow_sector {
+        sector == 3
+    } else if fade_all_side_edges {
         !keep_end
     } else {
         wrap_angle(end + std::f32::consts::FRAC_PI_2).abs() < 0.02
@@ -587,7 +834,12 @@ pub fn sky_native_panorama_panels(
                 })
                 .clamp(0.0, 1.0);
             let vertical = if upper {
-                if blend_horizon {
+                if !fade_all_side_edges {
+                    // Snow Jam's upper textures contain their own blue sky.
+                    // Blend their open top boundary into the polar dome;
+                    // opaque top edges become giant diagonal cuts in VR.
+                    (t / 0.125).clamp(0.0, 1.0)
+                } else if blend_horizon {
                     ((1.0 - t) * VERTICAL as f32 / OVERLAP_ROWS as f32).clamp(0.0, 1.0)
                 } else {
                     1.0
@@ -713,6 +965,35 @@ pub fn projection(left: f32, right: f32, down: f32, up: f32, near: f32, far: f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sky_joins_follow_mesh_edges_for_both_fourth_panel_orientations() {
+        const WORDS: usize = 17 * 9 * 4;
+        for angles in [[-45f32, 0., 45., 90.], [-45., 0., 45., -90.]] {
+            for rotation in [0.0, 2.7] {
+                let mut data = vec![[42; 4]; WORDS * 4];
+                let panels: Vec<_> = angles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| SkyPanel {
+                        data_start: i * WORDS,
+                        angles: [a.to_radians() + rotation, (a + 45.).to_radians() + rotation],
+                        upper: true,
+                    })
+                    .collect();
+                stitch_sky_panels(&mut data, &panels);
+                for (i, a) in angles.iter().enumerate() {
+                    let alpha = |col: usize| data[i * WORDS + (8 * 9 + col) * 4 + 2][3];
+                    let left_joined = angles.iter().any(|b| (b + 45. - a).abs() < 0.01);
+                    let right_joined = angles.iter().any(|b| (a + 45. - b).abs() < 0.01);
+                    assert_eq!(alpha(0), if left_joined { 128 } else { 0 });
+                    assert_eq!(alpha(8), if right_joined { 128 } else { 0 });
+                    assert_eq!(alpha(4), 128);
+                    assert_eq!(data[i * WORDS][0], 42);
+                }
+            }
+        }
+    }
 
     #[test]
     fn matching_eye_is_identity() {
@@ -990,6 +1271,14 @@ mod tests {
             }
         }
         call.uniforms[4][1] = 6;
+        // A restored sector captured with an earlier camera must share its
+        // edge rays with this frame's live neighbour, retaining its own art.
+        let mut cached = call.clone();
+        cached.uniforms[3][0] = 580.0f32.to_bits();
+        cached.uniforms[18][1] = 0.25f32.to_bits();
+        let artwork = cached.data.clone();
+        rebase_cached_sky_panel(&mut cached, &call);
+        assert_eq!(cached.data, artwork);
         let p = projection(-1.0, 1.0, -1.0, 1.0, 1.0, 30_000.0);
         let panels = sky_native_panorama_panels(
             &call,
@@ -1002,6 +1291,21 @@ mod tests {
             true,
         )
         .expect("Ruthless Ridge peak strip");
+        let restored = sky_native_panorama_panels(
+            &cached,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            true,
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            restored[0].data, panels[0].data,
+            "cached/live sector edge rays"
+        );
         assert_eq!(panels.len(), 1);
         let panel = &panels[0];
         assert_eq!(panel.uniforms[4][1], 17 * 9);
@@ -1013,6 +1317,48 @@ mod tests {
         assert_eq!(panel.data[4 * 4 + 2][3], 128);
         let bottom_left = 16 * 9 * 4;
         assert_eq!(panel.data[bottom_left + 1][0..2], [4096, 4096]);
+        let snow_upper = sky_native_panorama_panels(
+            &call,
+            p,
+            [0.0, 0.0],
+            (1024, 1024),
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            snow_upper[0].data[4 * 4 + 2][3],
+            0,
+            "open top fades into sky"
+        );
+        assert_eq!(snow_upper[0].data[(2 * 9 + 4) * 4 + 2][3], 128);
+        for (texture, first, last) in [(286, 0, 128), (284, 128, 128), (283, 128, 0)] {
+            let sector =
+                snow_sky_panorama_panels(&call, p, [0.0, 0.0], (1024, 1024), texture).unwrap();
+            // This fixture is rotated relative to Snow Jam's other meshes;
+            // artwork indices still identify the two open side boundaries.
+            assert_eq!(sector[0].data[(8 * 9) * 4 + 2][3], first);
+            assert_eq!(sector[0].data[(8 * 9 + 8) * 4 + 2][3], last);
+        }
+        // Even sectors never submitted by the forward camera have valid
+        // native artwork bounds on the first tracked frame.
+        for id in [289, 288, 287, 282, 286, 285, 284, 283] {
+            let source = snow_sky_sector(&call, 285, id).unwrap();
+            let sector = sky_native_panorama_panels(
+                &source,
+                p,
+                [0.0, 0.0],
+                (1024, 1024),
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("cold-cache Snow Jam sector");
+            assert_eq!(sector[0].data.len(), 17 * 9 * 4);
+        }
         // Gravitude's neighbouring upper strips meet at -45° and 0°.
         // Keep their artwork opaque there; an unpaired outer edge must
         // still fade into the blue dome instead of exposing a hard wedge.

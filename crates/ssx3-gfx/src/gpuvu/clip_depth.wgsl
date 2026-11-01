@@ -35,7 +35,9 @@ fn clip_depth(o: VOut) -> VOutClip {
     r.cd[1] = 2.0 * (o.pos.w - o.pos.z);
     // Screen z = zw.x / zw.y (zw.y is pos.w): XYZ2 takes it x16, XYZF2 as
     // is; depth = Z / (ZMAX + 1).
-    r.pos.z = select(o.zw.x * 16.0, o.zw.x, o.zm.x != 0.0) / (o.zm.y + 1.0);
+    if (!vr_enabled()) {
+        r.pos.z = select(o.zw.x * 16.0, o.zw.x, o.zm.x != 0.0) / (o.zm.y + 1.0);
+    }
     return r;
 }
 

@@ -152,6 +152,14 @@ impl GameWorker {
                 let mut pacer = ssx3_game::tick::Pacer::default();
                 let mut clock = Instant::now();
                 let mut was_running = false;
+                // Replay the same menu/button scenarios as the headless runner.
+                let scripted_input: Vec<(u64, u16, u64)> = std::env::var("SSX3_INPUT")
+                    .unwrap_or_default().split(',').filter_map(|entry| {
+                        let mut fields = entry.split(':');
+                        Some((fields.next()?.parse().ok()?,
+                            u16::from_str_radix(fields.next()?, 16).ok()?,
+                            fields.next().and_then(|n| n.parse().ok()).unwrap_or(6)))
+                    }).collect();
                 while !state.stop.load(Ordering::Acquire) {
                     if !state.running.load(Ordering::Acquire) {
                         was_running = false;
@@ -174,6 +182,12 @@ impl GameWorker {
                         }
                         let start = Instant::now();
                         update_pad(&mut gilrs, &mut cpu);
+                        let tick = state.frames.load(Ordering::Acquire);
+                        for &(at, buttons, length) in &scripted_input {
+                            if tick >= at && tick - at < length {
+                                ssx3_ps2::m!(cpu).sif.pad_buttons[0] |= buttons;
+                            }
+                        }
                         if !ssx3_ps2::machine::run_frame(&mut cpu) {
                             *state.error.lock().unwrap() = Some(format!(
                                 "Game halted: {:?}",
@@ -730,6 +744,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     &queue_access,
                     sources,
                     &p.ui,
+                    &p.transmission,
                     panel_eyes(eyes),
                     panel,
                 )?;
@@ -815,6 +830,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                 blit_ms / images.max(1) as f64,
             );
             eprintln!("[vr stages]{}", stages.report_and_reset());
+            let (output, audible) = ssx3_iop::audio::output_frames();
+            eprintln!(
+                "[vr audio] device frames {output}, nonzero {audible}, gaps {}",
+                ssx3_iop::audio::underrun_frames()
+            );
             if pose_misses != 0 {
                 eprintln!("[vr] missing rendered OpenXR pose mappings: {pose_misses}");
                 pose_misses = 0;
@@ -1008,6 +1028,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                         &queue_access,
                         sources,
                         &p.ui,
+                        &p.transmission,
                         panel_eyes(p.eyes.unwrap_or(eyes)),
                         panel,
                     )?
@@ -1019,6 +1040,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                             &gpu.queue,
                             sources,
                             &p.ui,
+                            &p.transmission,
                             panel_eyes(p.eyes.unwrap_or(eyes)),
                             panel,
                         )?,
@@ -1236,6 +1258,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             &gpu.queue,
             Some([&stereo[0].0, &stereo[1].0]),
             &presentation.ui,
+            &presentation.transmission,
             panel_eyes(eyes),
             panel,
         )?;
@@ -1267,6 +1290,12 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             return Err("Offline compositor produced an empty or duplicated eye".into());
         }
     } else if let Some(prefix) = std::env::var_os("SSX3_VR_OFFLINE_SAVE") {
+        if let Some((width, height, pixels)) = gfx.read_vr_ui_image() {
+            std::fs::write(
+                format!("{}-ui.png", prefix.to_string_lossy()),
+                png::encode(width, height, &pixels),
+            )?;
+        }
         let presentation = gfx.present_vr_snapshot().ok_or("No final spatial UI")?;
         let stereo = presentation.world.as_ref();
         compositor.blit_stereo(
@@ -1274,6 +1303,7 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             &gpu.queue,
             stereo.map(|s| [&s[0].0, &s[1].0]),
             &presentation.ui,
+            &presentation.transmission,
             panel_eyes(presentation.eyes.unwrap_or(eyes)),
             panel,
         )?;
@@ -1353,20 +1383,21 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
                 std::fs::create_dir_all(&dir)?;
                 ssx3_ps2::frame_sink::write_dumps(&dir)?;
             }
-            if gfx.present_vr_visibility_epoch() < generation {
+            let presentation = gfx.present_vr_snapshot().ok_or("No survey presentation")?;
+            if presentation.world.is_some() && gfx.present_vr_visibility_epoch() < generation {
                 return Err("Offline survey gaze visibility was not published".into());
             }
-            let presentation = gfx.present_vr_snapshot().ok_or("No survey presentation")?;
-            let drawn = presentation.eyes.ok_or("No tracked survey eyes")?;
+            let drawn = presentation.eyes.unwrap_or(eyes);
             if vr_camera::rotation_delta_deg(eyes[0], drawn[0]) > 0.1 {
                 return Err("Offline survey presented the wrong eye direction".into());
             }
-            let stereo = presentation.world.as_ref().ok_or("No survey world")?;
+            let stereo = presentation.world.as_ref();
             compositor.blit_stereo(
                 &gpu.device,
                 &gpu.queue,
-                Some([&stereo[0].0, &stereo[1].0]),
+                stereo.map(|views| [&views[0].0, &views[1].0]),
                 &presentation.ui,
+                &presentation.transmission,
                 panel_eyes(drawn),
                 panel,
             )?;
@@ -1374,12 +1405,18 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
             let lit = |pixels: &[u32]| pixels.iter().filter(|&&p| p & 0x00ff_ffff != 0).count();
             let differing = left.2.iter().zip(&right.2).filter(|(a, b)| a != b).count();
             println!(
-                "offline survey yaw {yaw_deg:.1}° tick {next_tick}: left {}/{}, right {}/{}, stereo differs at {differing} pixels",
+                "offline survey yaw {yaw_deg:.1}° tick {next_tick}: left {}/{}, right {}/{}, stereo differs at {differing} pixels, world {}",
                 lit(&left.2), left.2.len(), lit(&right.2), right.2.len(),
+                stereo.is_some(),
             );
-            if lit(&left.2) < left.2.len() * 9 / 10
-                || lit(&right.2) < right.2.len() * 9 / 10
-                || differing < left.2.len() / 20
+            let minimum_lit = if stereo.is_some() {
+                left.2.len() * 9 / 10
+            } else {
+                left.2.len() / 20
+            };
+            if lit(&left.2) < minimum_lit
+                || lit(&right.2) < minimum_lit
+                || (stereo.is_some() && differing < left.2.len() / 20)
             {
                 return Err("Offline survey has an empty or duplicated eye".into());
             }
@@ -1405,15 +1442,19 @@ fn run_offline_pipeline(frames_to_run: u64) -> Result<(), Box<dyn Error>> {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
-    let result = if args.get(1).is_some_and(|arg| arg == "--offline-pipeline") {
-        let frames = args
-            .get(2)
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(500);
-        run_offline_pipeline(frames)
-    } else {
-        run()
-    };
+    let result: Result<(), Box<dyn Error>> =
+        if args.get(1).is_some_and(|arg| arg == "--audio-diagnostics") {
+            ssx3_iop::audio::diagnose_output(args.iter().any(|arg| arg == "--tone"))
+                .map_err(Into::into)
+        } else if args.get(1).is_some_and(|arg| arg == "--offline-pipeline") {
+            let frames = args
+                .get(2)
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(500);
+            run_offline_pipeline(frames)
+        } else {
+            run()
+        };
     if let Err(err) = result {
         eprintln!("SSX 3 VR: {err}");
         std::process::exit(1);

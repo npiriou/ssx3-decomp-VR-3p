@@ -23,10 +23,48 @@ type Ring = Arc<Mutex<VecDeque<i16>>>;
 /// Frames the output device wanted while the ring was empty (it repeats
 /// the last sample then: an audible gap).
 static UNDERRUN_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static OUTPUT_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static OUTPUT_NONZERO_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Frames the device has played as gaps so far.
 pub fn underrun_frames() -> u64 {
     UNDERRUN_FRAMES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Frames handed to the host device, and frames containing a nonzero sample.
+pub fn output_frames() -> (u64, u64) {
+    (
+        OUTPUT_FRAMES.load(std::sync::atomic::Ordering::Relaxed),
+        OUTPUT_NONZERO_FRAMES.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Open the configured playback endpoint with silence, without booting the
+/// game. Keeps the executable's Windows mixer session visible for diagnosis.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn diagnose_output(audible: bool) -> Result<(), String> {
+    let ring: Ring = Arc::new(Mutex::new(VecDeque::with_capacity(RING_FRAMES * 2)));
+    let _stream = open_stream(ring.clone())?;
+    eprintln!("[audio] output diagnostic active for 15 seconds (tone: {audible})");
+    for block in 0..150 {
+        {
+            let mut q = ring.lock().map_err(|e| e.to_string())?;
+            for sample in 0..RATE / 10 {
+                let t = (block * (RATE / 10) + sample) as f32 / RATE as f32;
+                let envelope = (t / 0.02).min((3.0 - t) / 0.02).clamp(0.0, 1.0);
+                let value = if audible && block < 30 {
+                    (1200.0 * envelope * (t * 440.0 * std::f32::consts::TAU).sin()) as i16
+                } else {
+                    0
+                };
+                q.extend([value, value]);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let (frames, nonzero) = output_frames();
+    eprintln!("[audio] diagnostic completed: {frames} device frames, {nonzero} nonzero");
+    Ok(())
 }
 
 pub struct Sink {
@@ -282,6 +320,7 @@ fn open_stream(ring: Ring) -> Result<cpal::Stream, String> {
     let mut next = [0i16; 2];
     let mut fill = move |out: &mut dyn FnMut(usize, f32), frames: usize| {
         let mut q = ring.lock().unwrap();
+        let mut nonzero = 0u64;
         for i in 0..frames {
             frac += step;
             while frac >= 1.0 {
@@ -294,12 +333,17 @@ fn open_stream(ring: Ring) -> Result<cpal::Stream, String> {
                 }
             }
             let t = frac as f32;
+            if cur != [0, 0] || next != [0, 0] {
+                nonzero += 1;
+            }
             for ch in 0..channels {
                 let k = ch.min(1);
                 let v = cur[k] as f32 * (1.0 - t) + next[k] as f32 * t;
                 out(i * channels + ch, v / 32768.0);
             }
         }
+        OUTPUT_FRAMES.fetch_add(frames as u64, std::sync::atomic::Ordering::Relaxed);
+        OUTPUT_NONZERO_FRAMES.fetch_add(nonzero, std::sync::atomic::Ordering::Relaxed);
     };
     let err = |e| eprintln!("[audio] stream error: {e}");
     let stream = match supported.sample_format() {

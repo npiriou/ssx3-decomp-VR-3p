@@ -148,6 +148,22 @@ pub fn texture_ranges(m: &dyn Mem, frame: &Frame, out: &mut Vec<(u32, u32)>) {
             }
         }
     }
+    // A tracked view needs the whole native sky palette, including sectors
+    // not yet submitted by the original forward-camera cull.
+    if std::env::var("SSX3_VR_VISIBILITY").as_deref() == Ok("1") {
+        let textures: Vec<_> = frame
+            .draws()
+            .take_while(|d| {
+                d.matrix == 0 && d.state.layer == 0 && d.state.material == super::Material::General
+            })
+            .map(|d| d.tex[0])
+            .collect();
+        if let Some(layout) = crate::sky::Layout::detect(&textures) {
+            for id in layout.textures() {
+                used[id as usize] = true;
+            }
+        }
+    }
     for id in 0..TEX_MAX {
         let info = word(m, texman + TEX_TABLE + 4 * id);
         if info == 0 {

@@ -65,6 +65,7 @@ fn mat3_mesh_vertex(vi: u32, c: u32) -> VOut {
         // tracked eye instead of passing through the PS2 sky screen matrix.
         let eye_clip = b.vr_reproject * hc;
         o.pos = vec4<f32>(eye_clip.xy, 0.5 * (eye_clip.w - eye_clip.z), eye_clip.w);
+        if (b.vr_mode == 2u) { o.pos.z = 0.0; }
         o.zw = vec2<f32>(eye_clip.z, eye_clip.w);
         let tex_scale = fq(c, 29u);
         let eye_q = 1.0 / eye_clip.w;

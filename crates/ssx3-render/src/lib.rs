@@ -37,6 +37,7 @@ pub mod mat3;
 pub mod mat4;
 pub mod mat5;
 pub mod mat6;
+pub mod sky;
 pub mod vif;
 pub mod vr_visibility;
 pub mod vujob;
